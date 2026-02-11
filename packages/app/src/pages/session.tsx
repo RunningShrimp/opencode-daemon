@@ -562,7 +562,6 @@ export default function Page() {
   const [store, setStore] = createStore({
     activeDraggable: undefined as string | undefined,
     activeTerminalDraggable: undefined as string | undefined,
-    expanded: {} as Record<string, boolean>,
     messageId: undefined as string | undefined,
     turnStart: 0,
     mobileTab: "session" as "session" | "changes",
@@ -740,7 +739,6 @@ export default function Page() {
       sessionKey,
       () => {
         setStore("messageId", undefined)
-        setStore("expanded", {})
         setStore("changes", "session")
         setUi("autoCreated", false)
       },
@@ -758,12 +756,6 @@ export default function Page() {
       { defer: true },
     ),
   )
-
-  createEffect(() => {
-    const id = lastUserMessage()?.id
-    if (!id) return
-    setStore("expanded", id, status().type !== "idle")
-  })
 
   const selectionPreview = (path: string, selection: FileSelection) => {
     const content = file.get(path)?.content?.content
@@ -937,10 +929,8 @@ export default function Page() {
     status,
     userMessages,
     visibleUserMessages,
-    activeMessage,
     showAllFiles,
     navigateMessageByOffset,
-    setExpanded: (id, fn) => setStore("expanded", id, fn),
     setActiveMessage,
     addSelectionToContext,
     focusInput,
@@ -1650,8 +1640,6 @@ export default function Page() {
                       navMark({ dir: params.dir, to: id, name: "session:first-turn-mounted" })
                     }}
                     lastUserMessageID={lastUserMessage()?.id}
-                    expanded={store.expanded}
-                    onToggleExpanded={(id) => setStore("expanded", id, (open: boolean | undefined) => !open)}
                   />
                 </Show>
               </Match>
