@@ -1099,7 +1099,15 @@ export namespace Provider {
         if (options["timeout"] !== undefined && options["timeout"] !== null) {
           const signals: AbortSignal[] = []
           if (opts.signal) signals.push(opts.signal)
-          if (options["timeout"] !== false) signals.push(AbortSignal.timeout(options["timeout"]))
+          if (options["timeout"] !== false) {
+            signals.push(AbortSignal.timeout(options["timeout"]))
+          } else {
+            // 警告：完全禁用超时可能导致请求无限期挂起
+            console.warn(
+              `[Provider] WARNING: timeout is disabled for provider "${options["providerID"]}. ` +
+              "This may cause requests to hang indefinitely. Consider setting a reasonable timeout value."
+            )
+          }
 
           const combined = signals.length > 1 ? AbortSignal.any(signals) : signals[0]
 

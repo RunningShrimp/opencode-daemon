@@ -24,6 +24,359 @@ import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import open from "open"
 
+// ============================================================================
+// MCP Performance Optimization: Local vs Remote Specific
+// ============================================================================
+
+// Local MCP: Process pool and keep-alive management
+interface LocalMCPProcess {
+  client: Client
+  serverName: string
+  createdAt: number
+  lastUsed: number
+  useCount: number
+}
+
+class LocalMCPProcessPool {
+  private processes = new Map<string, LocalMCPProcess>()
+  private config = {
+    maxProcesses: 5,
+    idleTimeoutMs: 5 * 60 * 1000, // 5 minutes
+    maxUsesPerProcess: 100,
+  }
+
+  async acquire(serverName: string, factory: () => Promise<Client>): Promise<Client> {
+    const key = serverName
+
+    // Check for available process
+    const existing = this.processes.get(key)
+    if (existing) {
+      const now = Date.now()
+
+      // Check if process is still healthy and within limits
+      if (
+        now - existing.lastUsed < this.config.idleTimeoutMs &&
+        existing.useCount < this.config.maxUsesPerProcess
+      ) {
+        existing.lastUsed = now
+        existing.useCount++
+        return existing.client
+      } else {
+        // Close old process
+        try {
+          await existing.client.close()
+        } catch {}
+        this.processes.delete(key)
+      }
+    }
+
+    // Create new process if under limit
+    if (this.processes.size >= this.config.maxProcesses) {
+      // Close oldest process
+      let oldest: LocalMCPProcess | undefined
+      let oldestTime = Infinity
+      for (const [k, p] of this.processes) {
+        if (p.lastUsed < oldestTime) {
+          oldestTime = p.lastUsed
+          oldest = p
+        }
+      }
+      if (oldest) {
+        try {
+          await oldest.client.close()
+        } catch {}
+        this.processes.delete(oldest.serverName)
+      }
+    }
+
+    // Create new process
+    const client = await factory()
+    this.processes.set(key, {
+      client,
+      serverName,
+      createdAt: Date.now(),
+      lastUsed: Date.now(),
+      useCount: 1,
+    })
+
+    return client
+  }
+
+  async release(serverName: string): Promise<void> {
+    // Local MCP processes are kept alive for reuse
+  }
+
+  async close(serverName: string): Promise<void> {
+    const process = this.processes.get(serverName)
+    if (process) {
+      try {
+        await process.client.close()
+      } catch {}
+      this.processes.delete(serverName)
+    }
+  }
+
+  async closeAll(): Promise<void> {
+    for (const [key, process] of this.processes) {
+      try {
+        await process.client.close()
+      } catch {}
+    }
+    this.processes.clear()
+  }
+
+  getStats() {
+    return {
+      activeProcesses: this.processes.size,
+      maxProcesses: this.config.maxProcesses,
+    }
+  }
+}
+
+const localProcessPool = new LocalMCPProcessPool()
+
+// Remote MCP: Connection pool and HTTP optimization
+interface RemoteMCPConnection {
+  client: Client
+  serverName: string
+  createdAt: number
+  lastUsed: number
+  requestCount: number
+}
+
+class RemoteMCPConnectionPool {
+  private connections = new Map<string, RemoteMCPConnection>()
+  private pending = new Map<string, Promise<Client>>()
+  private config = {
+    maxConnectionsPerServer: 3,
+    idleTimeoutMs: 2 * 60 * 1000, // 2 minutes
+    maxRequestsPerConnection: 50,
+  }
+
+  async acquire(
+    serverName: string,
+    url: string,
+    factory: () => Promise<Client>,
+  ): Promise<Client> {
+    // Check if there's already a pending connection
+    const pendingKey = `${serverName}:pending`
+    const existingPending = this.pending.get(pendingKey)
+    if (existingPending) {
+      return existingPending
+    }
+
+    // Check for available connection
+    const existing = this.connections.get(serverName)
+    if (existing) {
+      const now = Date.now()
+
+      if (
+        now - existing.lastUsed < this.config.idleTimeoutMs &&
+        existing.requestCount < this.config.maxRequestsPerConnection
+      ) {
+        existing.lastUsed = now
+        existing.requestCount++
+        return existing.client
+      } else {
+        try {
+          await existing.client.close()
+        } catch {}
+        this.connections.delete(serverName)
+      }
+    }
+
+    // Create new connection with pending tracking
+    const createConnection = async (): Promise<Client> => {
+      const client = await factory()
+      this.connections.set(serverName, {
+        client,
+        serverName,
+        createdAt: Date.now(),
+        lastUsed: Date.now(),
+        requestCount: 1,
+      })
+      this.pending.delete(pendingKey)
+      return client
+    }
+
+    this.pending.set(pendingKey, createConnection())
+
+    try {
+      return await this.pending.get(pendingKey)!
+    } catch (error) {
+      this.pending.delete(pendingKey)
+      throw error
+    }
+  }
+
+  async close(serverName: string): Promise<void> {
+    const connection = this.connections.get(serverName)
+    if (connection) {
+      try {
+        await connection.client.close()
+      } catch {}
+      this.connections.delete(serverName)
+    }
+  }
+
+  async closeAll(): Promise<void> {
+    for (const [key, conn] of this.connections) {
+      try {
+        await conn.client.close()
+      } catch {}
+    }
+    this.connections.clear()
+    this.pending.clear()
+  }
+
+  getStats() {
+    return {
+      activeConnections: this.connections.size,
+      pendingConnections: this.pending.size,
+      maxPerServer: this.config.maxConnectionsPerServer,
+    }
+  }
+}
+
+const remoteConnectionPool = new RemoteMCPConnectionPool()
+
+// Server-type specific retry strategies
+const RETRY_STRATEGIES = {
+  local: {
+    maxAttempts: 2,
+    baseDelayMs: 50, // Fast retry for local
+    maxDelayMs: 500,
+    backoffMultiplier: 2,
+  },
+  remote: {
+    maxAttempts: 3,
+    baseDelayMs: 200, // Slower for remote
+    maxDelayMs: 5000,
+    backoffMultiplier: 2,
+  },
+}
+
+// Circuit breaker for local vs remote
+enum CircuitState {
+  CLOSED = "closed",
+  OPEN = "open",
+  HALF_OPEN = "half_open",
+}
+
+class MCPCircuitBreaker {
+  private state = CircuitState.CLOSED
+  private failures = 0
+  private successes = 0
+  private nextAttempt = 0
+
+  constructor(
+    private failureThreshold: number,
+    private successThreshold: number,
+    private timeout: number,
+  ) {}
+
+  async execute<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.state === CircuitState.OPEN) {
+      if (Date.now() < this.nextAttempt) {
+        throw new Error("Circuit breaker is OPEN")
+      }
+      this.state = CircuitState.HALF_OPEN
+      this.successes = 0
+    }
+
+    try {
+      const result = await operation()
+      this.onSuccess()
+      return result
+    } catch (error) {
+      this.onFailure()
+      throw error
+    }
+  }
+
+  private onSuccess(): void {
+    this.failures = 0
+    if (this.state === CircuitState.HALF_OPEN) {
+      this.successes++
+      if (this.successes >= this.successThreshold) {
+        this.state = CircuitState.CLOSED
+      }
+    }
+  }
+
+  private onFailure(): void {
+    this.failures++
+    if (this.state === CircuitState.HALF_OPEN) {
+      this.state = CircuitState.OPEN
+      this.nextAttempt = Date.now() + this.timeout
+    } else if (this.failures >= this.failureThreshold) {
+      this.state = CircuitState.OPEN
+      this.nextAttempt = Date.now() + this.timeout
+    }
+  }
+
+  getState(): CircuitState {
+    return this.state
+  }
+
+  reset(): void {
+    this.state = CircuitState.CLOSED
+    this.failures = 0
+    this.successes = 0
+  }
+}
+
+// Circuit breakers per server with type-specific config
+const circuitBreakers = new Map<string, MCPCircuitBreaker>()
+
+function getCircuitBreaker(serverName: string, serverType: "local" | "remote"): MCPCircuitBreaker {
+  const key = `${serverName}:${serverType}`
+  let cb = circuitBreakers.get(key)
+
+  if (!cb) {
+    const strategy = RETRY_STRATEGIES[serverType]
+    cb = new MCPCircuitBreaker(
+      serverType === "local" ? 3 : 5, // Local more tolerant
+      2,
+      serverType === "local" ? 10_000 : 30_000, // Local 10s, Remote 30s
+    )
+    circuitBreakers.set(key, cb)
+  }
+
+  return cb
+}
+
+// Retry with type-specific strategy
+async function mcpRetry<T>(
+  operation: () => Promise<T>,
+  serverType: "local" | "remote",
+  customStrategy?: Partial<typeof RETRY_STRATEGIES.local>,
+): Promise<T> {
+  const strategy = { ...RETRY_STRATEGIES[serverType], ...customStrategy }
+  let lastError: Error | undefined
+
+  for (let attempt = 1; attempt <= strategy.maxAttempts; attempt++) {
+    try {
+      return await operation()
+    } catch (error) {
+      lastError = error as Error
+
+      if (attempt === strategy.maxAttempts) {
+        throw lastError
+      }
+
+      const delay = Math.min(
+        strategy.baseDelayMs * Math.pow(strategy.backoffMultiplier, attempt - 1),
+        strategy.maxDelayMs,
+      )
+
+      await new Promise((resolve) => setTimeout(resolve, delay))
+    }
+  }
+
+  throw lastError
+}
+
 export namespace MCP {
   const log = Log.create({ service: "mcp" })
   const DEFAULT_TIMEOUT = 30_000
@@ -117,7 +470,12 @@ export namespace MCP {
   }
 
   // Convert MCP tool definition to AI SDK Tool type
-  async function convertMcpTool(mcpTool: MCPToolDef, client: MCPClient, timeout?: number): Promise<Tool> {
+  async function convertMcpTool(
+    mcpTool: MCPToolDef,
+    client: MCPClient,
+    serverType: "local" | "remote",
+    timeout?: number,
+  ): Promise<Tool> {
     const inputSchema = mcpTool.inputSchema
 
     // Spread first, then override type to ensure it's always "object"
@@ -128,21 +486,31 @@ export namespace MCP {
       additionalProperties: false,
     }
 
+    // Get circuit breaker for this server type
+    const circuitBreaker = getCircuitBreaker("tool", serverType)
+
     return dynamicTool({
       description: mcpTool.description ?? "",
       inputSchema: jsonSchema(schema),
       execute: async (args: unknown) => {
-        return client.callTool(
-          {
-            name: mcpTool.name,
-            arguments: (args || {}) as Record<string, unknown>,
-          },
-          CallToolResultSchema,
-          {
-            resetTimeoutOnProgress: true,
-            timeout,
-          },
-        )
+        return await circuitBreaker.execute(async () => {
+          return await mcpRetry(
+            async () => {
+              return await client.callTool(
+                {
+                  name: mcpTool.name,
+                  arguments: (args || {}) as Record<string, unknown>,
+                },
+                CallToolResultSchema,
+                {
+                  resetTimeoutOnProgress: true,
+                  timeout,
+                },
+              )
+            },
+            serverType,
+          )
+        })
       },
     })
   }
@@ -356,127 +724,136 @@ export namespace MCP {
           {
             onRedirect: async (url) => {
               log.info("oauth redirect requested", { key, url: url.toString() })
-              // Store the URL - actual browser opening is handled by startAuth
             },
           },
         )
       }
 
-      const transports: Array<{ name: string; transport: TransportWithAuth }> = [
-        {
-          name: "StreamableHTTP",
-          transport: new StreamableHTTPClientTransport(new URL(mcp.url), {
-            authProvider,
-            requestInit: mcp.headers ? { headers: mcp.headers } : undefined,
-          }),
-        },
-        {
-          name: "SSE",
-          transport: new SSEClientTransport(new URL(mcp.url), {
-            authProvider,
-            requestInit: mcp.headers ? { headers: mcp.headers } : undefined,
-          }),
-        },
-      ]
+      // Use connection pool for remote MCP
+      try {
+        mcpClient = await remoteConnectionPool.acquire(
+          key,
+          mcp.url,
+          async () => {
+            const transports: Array<{ name: string; transport: TransportWithAuth }> = [
+              {
+                name: "StreamableHTTP",
+                transport: new StreamableHTTPClientTransport(new URL(mcp.url), {
+                  authProvider,
+                  requestInit: mcp.headers ? { headers: mcp.headers } : undefined,
+                }),
+              },
+              {
+                name: "SSE",
+                transport: new SSEClientTransport(new URL(mcp.url), {
+                  authProvider,
+                  requestInit: mcp.headers ? { headers: mcp.headers } : undefined,
+                }),
+              },
+            ]
 
-      let lastError: Error | undefined
-      const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
-      for (const { name, transport } of transports) {
-        try {
+            let lastError: Error | undefined
+            const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
+
+            for (const { name, transport } of transports) {
+              try {
+                const client = new Client({
+                  name: "opencode",
+                  version: Installation.VERSION,
+                })
+                await withTimeout(client.connect(transport), connectTimeout)
+                registerNotificationHandlers(client, key)
+                log.info("connected via pool", { key, transport: name })
+                return client
+              } catch (error) {
+                lastError = error instanceof Error ? error : new Error(String(error))
+
+                if (error instanceof UnauthorizedError) {
+                  if (lastError.message.includes("registration") || lastError.message.includes("client_id")) {
+                    status = {
+                      status: "needs_client_registration" as const,
+                      error: "Server does not support dynamic client registration.",
+                    }
+                    Bus.publish(TuiEvent.ToastShow, {
+                      title: "MCP Authentication Required",
+                      message: `Server "${key}" requires a pre-registered client ID.`,
+                      variant: "warning",
+                      duration: 8000,
+                    }).catch((e) => log.debug("failed to show toast", { error: e }))
+                  } else {
+                    pendingOAuthTransports.set(key, transport)
+                    status = { status: "needs_auth" as const }
+                    Bus.publish(TuiEvent.ToastShow, {
+                      title: "MCP Authentication Required",
+                      message: `Server "${key}" requires authentication.`,
+                      variant: "warning",
+                      duration: 8000,
+                    }).catch((e) => log.debug("failed to show toast", { error: e }))
+                  }
+                  break
+                }
+
+                log.debug("transport connection failed", { key, transport: name, error: lastError.message })
+              }
+            }
+
+            throw lastError || new Error("All transports failed")
+          },
+        )
+
+        if (mcpClient) {
+          status = { status: "connected" }
+          log.info("connected via connection pool", { key })
+        }
+      } catch (error) {
+        log.error("remote mcp connection failed", { key, error })
+        status = {
+          status: "failed" as const,
+          error: error instanceof Error ? error.message : String(error),
+        }
+      }
+    }
+
+    if (mcp.type === "local") {
+      // Use process pool for local MCP
+      try {
+        mcpClient = await localProcessPool.acquire(key, async () => {
+          const [cmd, ...args] = mcp.command
+          const cwd = Instance.directory
+          const transport = new StdioClientTransport({
+            stderr: "pipe",
+            command: cmd,
+            args,
+            cwd,
+            env: {
+              ...process.env,
+              ...(cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}),
+              ...mcp.environment,
+            },
+          })
+          transport.stderr?.on("data", (chunk: Buffer) => {
+            log.info(`mcp stderr: ${chunk.toString()}`, { key })
+          })
+
+          const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
           const client = new Client({
             name: "opencode",
             version: Installation.VERSION,
           })
           await withTimeout(client.connect(transport), connectTimeout)
           registerNotificationHandlers(client, key)
-          mcpClient = client
-          log.info("connected", { key, transport: name })
-          status = { status: "connected" }
-          break
-        } catch (error) {
-          lastError = error instanceof Error ? error : new Error(String(error))
-
-          // Handle OAuth-specific errors
-          if (error instanceof UnauthorizedError) {
-            log.info("mcp server requires authentication", { key, transport: name })
-
-            // Check if this is a "needs registration" error
-            if (lastError.message.includes("registration") || lastError.message.includes("client_id")) {
-              status = {
-                status: "needs_client_registration" as const,
-                error: "Server does not support dynamic client registration. Please provide clientId in config.",
-              }
-              // Show toast for needs_client_registration
-              Bus.publish(TuiEvent.ToastShow, {
-                title: "MCP Authentication Required",
-                message: `Server "${key}" requires a pre-registered client ID. Add clientId to your config.`,
-                variant: "warning",
-                duration: 8000,
-              }).catch((e) => log.debug("failed to show toast", { error: e }))
-            } else {
-              // Store transport for later finishAuth call
-              pendingOAuthTransports.set(key, transport)
-              status = { status: "needs_auth" as const }
-              // Show toast for needs_auth
-              Bus.publish(TuiEvent.ToastShow, {
-                title: "MCP Authentication Required",
-                message: `Server "${key}" requires authentication. Run: opencode mcp auth ${key}`,
-                variant: "warning",
-                duration: 8000,
-              }).catch((e) => log.debug("failed to show toast", { error: e }))
-            }
-            break
-          }
-
-          log.debug("transport connection failed", {
-            key,
-            transport: name,
-            url: mcp.url,
-            error: lastError.message,
-          })
-          status = {
-            status: "failed" as const,
-            error: lastError.message,
-          }
-        }
-      }
-    }
-
-    if (mcp.type === "local") {
-      const [cmd, ...args] = mcp.command
-      const cwd = Instance.directory
-      const transport = new StdioClientTransport({
-        stderr: "pipe",
-        command: cmd,
-        args,
-        cwd,
-        env: {
-          ...process.env,
-          ...(cmd === "opencode" ? { BUN_BE_BUN: "1" } : {}),
-          ...mcp.environment,
-        },
-      })
-      transport.stderr?.on("data", (chunk: Buffer) => {
-        log.info(`mcp stderr: ${chunk.toString()}`, { key })
-      })
-
-      const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
-      try {
-        const client = new Client({
-          name: "opencode",
-          version: Installation.VERSION,
+          log.info("local mcp connected via pool", { key })
+          return client
         })
-        await withTimeout(client.connect(transport), connectTimeout)
-        registerNotificationHandlers(client, key)
-        mcpClient = client
-        status = {
-          status: "connected",
+
+        if (mcpClient) {
+          status = { status: "connected" }
+          log.info("acquired local mcp from pool", { key })
         }
       } catch (error) {
-        log.error("local mcp startup failed", {
+        log.error("local mcp process pool failed", {
           key,
           command: mcp.command,
-          cwd,
           error: error instanceof Error ? error.message : String(error),
         })
         status = {
@@ -500,7 +877,9 @@ export namespace MCP {
       }
     }
 
-    const result = await withTimeout(mcpClient.listTools(), mcp.timeout ?? DEFAULT_TIMEOUT).catch((err) => {
+    // 为 listTools 使用更短的超时时间（最多 10 秒）
+    const LIST_TOOLS_TIMEOUT = Math.min((mcp.timeout ?? DEFAULT_TIMEOUT), 10000)
+    const result = await withTimeout(mcpClient.listTools(), LIST_TOOLS_TIMEOUT).catch((err) => {
       log.error("failed to get tools from client", { key, error: err })
       return undefined
     })
@@ -633,10 +1012,17 @@ export namespace MCP {
       const mcpConfig = config[clientName]
       const entry = isMcpConfigured(mcpConfig) ? mcpConfig : undefined
       const timeout = entry?.timeout ?? defaultTimeout
+      const serverType = entry?.type === "remote" ? "remote" : "local"
+
       for (const mcpTool of toolsResult.tools) {
         const sanitizedClientName = clientName.replace(/[^a-zA-Z0-9_-]/g, "_")
         const sanitizedToolName = mcpTool.name.replace(/[^a-zA-Z0-9_-]/g, "_")
-        result[sanitizedClientName + "_" + sanitizedToolName] = await convertMcpTool(mcpTool, client, timeout)
+        result[sanitizedClientName + "_" + sanitizedToolName] = await convertMcpTool(
+          mcpTool,
+          client,
+          serverType,
+          timeout,
+        )
       }
     }
     return result
@@ -970,5 +1356,26 @@ export namespace MCP {
     if (!hasTokens) return "not_authenticated"
     const expired = await McpAuth.isTokenExpired(mcpName)
     return expired ? "expired" : "authenticated"
+  }
+
+  /**
+   * Get MCP optimization stats for monitoring
+   */
+  export function getOptimizationStats() {
+    return {
+      localProcessPool: localProcessPool.getStats(),
+      remoteConnectionPool: remoteConnectionPool.getStats(),
+      circuitBreakers: Object.fromEntries(
+        Array.from(circuitBreakers.entries()).map(([key, cb]) => [key, cb.getState()]),
+      ),
+    }
+  }
+
+  /**
+   * Close all MCP connections and processes
+   */
+  export async function closeAll(): Promise<void> {
+    await localProcessPool.closeAll()
+    await remoteConnectionPool.closeAll()
   }
 }
