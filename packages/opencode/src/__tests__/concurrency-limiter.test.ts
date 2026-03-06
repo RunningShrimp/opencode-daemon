@@ -10,7 +10,18 @@
  */
 
 import { describe, test, expect } from "bun:test"
-import { ConcurrencyLimiter, globalLspLimiter, globalMcpLimiter, globalFileLimiter, globalSubagentLimiter, withLspLimit, withMcpLimit, withFileLimit, withSubagentLimit, ConcurrencyLimiterManager } from "../util/concurrency-limiter"
+import {
+  ConcurrencyLimiter,
+  globalLspLimiter,
+  globalMcpLimiter,
+  globalFileLimiter,
+  globalSubagentLimiter,
+  withLspLimit,
+  withMcpLimit,
+  withFileLimit,
+  withSubagentLimit,
+  ConcurrencyLimiterManager,
+} from "../util/concurrency-limiter"
 
 describe("ConcurrencyLimiter", () => {
   describe("construction", () => {
@@ -227,11 +238,7 @@ describe("ConcurrencyLimiter", () => {
         return "running"
       })
 
-      const queued = [
-        limiter.run(async () => "1"),
-        limiter.run(async () => "2"),
-        limiter.run(async () => "3"),
-      ]
+      const queued = [limiter.run(async () => "1"), limiter.run(async () => "2"), limiter.run(async () => "3")]
 
       await new Promise((resolve) => setTimeout(resolve, 3))
 
@@ -253,9 +260,39 @@ describe("ConcurrencyLimiter", () => {
 
       limiter.drainQueue(new Error("Drained"))
 
-      await expect(limiter.run(async () => "test")).rejects.toThrow(
-        "ConcurrencyLimiter has been drained"
-      )
+      await expect(limiter.run(async () => "test")).rejects.toThrow("ConcurrencyLimiter has been drained")
+    })
+
+    test("drainQueue does not cause negative activeCount", async () => {
+      const limiter = new ConcurrencyLimiter(1)
+
+      const queued = [
+        limiter.run(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 100))
+          return "1"
+        }),
+        limiter.run(async () => "2"),
+        limiter.run(async () => "3"),
+      ]
+
+      await new Promise((resolve) => setTimeout(resolve, 5))
+
+      expect(limiter.getActiveCount()).toBe(1)
+      expect(limiter.getQueueLength()).toBe(2)
+
+      const drainError = new Error("Queue drained")
+      const drained = limiter.drainQueue(drainError)
+
+      expect(drained).toBe(2)
+      expect(limiter.getActiveCount()).toBe(1)
+
+      const results = await Promise.allSettled(queued)
+      expect(results[0].status).toBe("fulfilled")
+      expect((results[0] as PromiseFulfilledResult<string>).value).toBe("1")
+      expect(results[1].status).toBe("rejected")
+      expect(results[2].status).toBe("rejected")
+
+      expect(limiter.getActiveCount()).toBe(0)
     })
 
     test("drainQueue returns correct count", async () => {
@@ -289,12 +326,14 @@ describe("ConcurrencyLimiter", () => {
     test("waits for all operations to complete", async () => {
       const limiter = new ConcurrencyLimiter(2)
 
-      const tasks = Array(3).fill(0).map(() =>
-        limiter.run(async () => {
-          await new Promise((resolve) => setTimeout(resolve, 10))
-          return "done"
-        })
-      )
+      const tasks = Array(3)
+        .fill(0)
+        .map(() =>
+          limiter.run(async () => {
+            await new Promise((resolve) => setTimeout(resolve, 10))
+            return "done"
+          }),
+        )
 
       await limiter.waitForIdle()
 

@@ -21,6 +21,7 @@ interface QueuedOperation<T> {
   fn: () => Promise<T>
   resolve: (value: T) => void
   reject: (error: Error) => void
+  started: boolean
 }
 
 /**
@@ -109,13 +110,18 @@ export class ConcurrencyLimiter {
       const operation: QueuedOperation<T> = {
         fn,
         resolve: (value: T) => {
-          this.decrementActiveCount()
+          if (operation.started) {
+            this.decrementActiveCount()
+          }
           resolve(value)
         },
         reject: (error: Error) => {
-          this.decrementActiveCount()
+          if (operation.started) {
+            this.decrementActiveCount()
+          }
           reject(error)
         },
+        started: false,
       }
       this.waitQueue.push(operation)
 
@@ -158,10 +164,8 @@ export class ConcurrencyLimiter {
       }
 
       this._activeCount++
-      // Execute the queued function
-      next.fn()
-        .then(next.resolve)
-        .catch(next.reject)
+      next.started = true
+      next.fn().then(next.resolve).catch(next.reject)
     })
   }
 
@@ -209,7 +213,6 @@ export class ConcurrencyLimiter {
    * @returns Number of operations that were queued and rejected
    */
   drainQueue(error: Error): number {
-    // Mark as drained to prevent new operations
     this._drained = true
 
     const queueLength = this.waitQueue.length
@@ -219,16 +222,23 @@ export class ConcurrencyLimiter {
       activeCount: this._activeCount,
     })
 
-    // Reject all queued operations
+    const pendingRejects: Array<() => void> = []
+
     while (this.waitQueue.length > 0) {
       const next = this.waitQueue.shift()
       if (next) {
-        // Use queueMicrotask to avoid modifying queue while iterating
-        queueMicrotask(() => {
-          next.reject(error)
+        pendingRejects.push(() => {
+          const rawReject = next.reject.bind(null, error)
+          rawReject()
         })
       }
     }
+
+    queueMicrotask(() => {
+      pendingRejects.forEach((reject) => {
+        reject()
+      })
+    })
 
     return queueLength
   }
