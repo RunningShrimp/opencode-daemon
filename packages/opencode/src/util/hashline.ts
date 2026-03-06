@@ -1,16 +1,8 @@
 import { crc32 } from "./crc32"
 
-// Lazy init log to avoid circular deps in tests
-let _log: { debug: (msg: string, data?: object) => void } | null = null
-function getLog(): { debug: (msg: string, data?: object) => void } {
-  if (_log) return _log
-  try {
-    const { Log } = require("./log")
-    _log = Log.create({ service: "hashline" })
-  } catch {
-    _log = { debug: () => {} }
-  }
-  return _log!
+const noop = { debug: () => {} }
+function getLog() {
+  return noop
 }
 
 export interface HashLineConfig {

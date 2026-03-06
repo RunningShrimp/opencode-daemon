@@ -75,7 +75,9 @@ export namespace Terminal {
         }
 
         // Return immediately if we have all 16 palette colors
-        if (paletteColors.filter((c) => c !== undefined).length === 16) {
+        // Use Object.keys to check if we have all 16 indices (not just non-undefined count)
+        const colorCount = Object.keys(paletteColors).length
+        if (colorCount >= 16) {
           cleanup()
           resolve({ background, foreground, colors: paletteColors })
         }

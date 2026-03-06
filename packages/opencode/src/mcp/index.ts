@@ -470,12 +470,18 @@ export namespace MCP {
   }
 
   // Convert MCP tool definition to AI SDK Tool type
+  // Uses DEFAULT_TIMEOUT as fallback when no timeout is provided
+  const TOOL_DEFAULT_TIMEOUT = 30_000 // 30 seconds
+
   async function convertMcpTool(
     mcpTool: MCPToolDef,
     client: MCPClient,
     serverType: "local" | "remote",
     timeout?: number,
   ): Promise<Tool> {
+    // Use provided timeout or fall back to default
+    const effectiveTimeout = timeout ?? TOOL_DEFAULT_TIMEOUT
+
     const inputSchema = mcpTool.inputSchema
 
     // Spread first, then override type to ensure it's always "object"
@@ -504,7 +510,7 @@ export namespace MCP {
                 CallToolResultSchema,
                 {
                   resetTimeoutOnProgress: true,
-                  timeout,
+                  timeout: effectiveTimeout, // Use the effective timeout
                 },
               )
             },

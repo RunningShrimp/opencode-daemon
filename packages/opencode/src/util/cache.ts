@@ -1,35 +1,82 @@
+/**
+ * Cache Module
+ *
+ * Provides in-memory caching with LRU (Least Recently Used) eviction strategy.
+ * Supports TTL (Time To Live) for automatic expiration.
+ */
+
 interface CacheEntry<T> {
   value: T
   timestamp: number
   ttl: number
 }
 
+/**
+ * SimpleCache implements an LRU (Least Recently Used) cache with TTL support.
+ *
+ * When the cache reaches max capacity, the least recently used entries are evicted.
+ * TTL allows entries to automatically expire after a specified time.
+ *
+ * @example
+ * ```typescript
+ * const cache = new SimpleCache<string>(100, 60000) // 100 items, 60s TTL
+ * cache.set("key", "value")
+ * const value = cache.get("key") // Returns "value" or undefined if expired
+ * ```
+ */
 class SimpleCache<T> {
+  // Use array for ordered LRU tracking - most recently used at the end
   private cache = new Map<string, CacheEntry<T>>()
   private maxSize: number
   private defaultTtl: number
 
+  /**
+   * Create a new cache
+   * @param maxSize - Maximum number of items to store
+   * @param defaultTtl - Default time-to-live in milliseconds
+   */
   constructor(maxSize: number = 10000, defaultTtl: number = 3600000) {
     this.maxSize = maxSize
     this.defaultTtl = defaultTtl
   }
 
+  /**
+   * Get a value from the cache
+   * Updates access order for LRU tracking
+   */
   get(key: string): T | undefined {
     const entry = this.cache.get(key)
     if (!entry) return undefined
 
+    // Check if expired
     if (Date.now() - entry.timestamp > entry.ttl) {
       this.cache.delete(key)
       return undefined
     }
 
+    // Move to end (most recently used) for LRU tracking
+    this.cache.delete(key)
+    this.cache.set(key, entry)
+
     return entry.value
   }
 
+  /**
+   * Set a value in the cache
+   * Implements LRU eviction when capacity is reached
+   */
   set(key: string, value: T, ttl?: number): void {
+    // If key exists, delete first to update position
+    if (this.cache.has(key)) {
+      this.cache.delete(key)
+    }
+
+    // If at capacity, evict least recently used (first item)
     if (this.cache.size >= this.maxSize) {
       const firstKey = this.cache.keys().next().value
-      if (firstKey) this.cache.delete(firstKey)
+      if (firstKey) {
+        this.cache.delete(firstKey)
+      }
     }
 
     this.cache.set(key, {
@@ -39,10 +86,14 @@ class SimpleCache<T> {
     })
   }
 
+  /**
+   * Check if a key exists (without updating LRU order)
+   */
   has(key: string): boolean {
     const entry = this.cache.get(key)
     if (!entry) return false
 
+    // Check if expired
     if (Date.now() - entry.timestamp > entry.ttl) {
       this.cache.delete(key)
       return false
@@ -51,16 +102,36 @@ class SimpleCache<T> {
     return true
   }
 
+  /**
+   * Delete a key from the cache
+   */
   delete(key: string): boolean {
     return this.cache.delete(key)
   }
 
+  /**
+   * Clear all entries
+   */
   clear(): void {
     this.cache.clear()
   }
 
+  /**
+   * Get current cache size
+   */
   size(): number {
     return this.cache.size
+  }
+
+  /**
+   * Get cache statistics
+   */
+  getStats(): { size: number; maxSize: number; hitRate: number } {
+    return {
+      size: this.cache.size,
+      maxSize: this.maxSize,
+      hitRate: 0, // Could be implemented with hit/miss tracking
+    }
   }
 }
 

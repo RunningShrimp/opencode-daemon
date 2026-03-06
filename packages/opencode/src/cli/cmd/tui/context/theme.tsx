@@ -317,13 +317,11 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
     onMount(init)
 
     function resolveSystemTheme() {
-      console.log("resolveSystemTheme")
       renderer
         .getPalette({
           size: 16,
         })
         .then((colors) => {
-          console.log(colors.palette)
           if (!colors.palette[0]) {
             if (store.active === "system") {
               setStore(
@@ -359,13 +357,25 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
     const syntax = createMemo(() => generateSyntax(values()))
     const subtleSyntax = createMemo(() => generateSubtleSyntax(values()))
 
+    // Track values to detect changes and recreate proxy when needed
+    let lastValuesSnapshot: ReturnType<typeof resolveTheme> | undefined
+    let cachedThemeProxy: Proxy<ReturnType<typeof resolveTheme>> | undefined
+
     return {
-      theme: new Proxy(values(), {
-        get(_target, prop) {
-          // @ts-expect-error
-          return values()[prop]
-        },
-      }),
+      get theme() {
+        const currentValues = values()
+        // Recreate proxy only when values actually change
+        if (!cachedThemeProxy || currentValues !== lastValuesSnapshot) {
+          lastValuesSnapshot = currentValues
+          cachedThemeProxy = new Proxy(currentValues, {
+            get(_target, prop) {
+              // @ts-expect-error
+              return currentValues[prop]
+            },
+          })
+        }
+        return cachedThemeProxy
+      },
       get selected() {
         return store.active
       },

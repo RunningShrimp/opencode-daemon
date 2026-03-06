@@ -1,8 +1,46 @@
 # OpenCode-Daemon 性能优化方案
 
-> 版本: 1.0  
+> 版本: 2.0  
 > 日期: 2026-03-06  
-> 状态: 规划中
+> 状态: ✅ 已完成
+
+## 实施状态
+
+所有优化项已完成实施。
+
+| 任务 | 状态 | 实施文件 |
+|------|------|----------|
+| P0-1: MemoryGuard 回调泄漏 | ✅ 已完成 | `util/memory-guard.ts` |
+| P0-2: 日志清理逻辑 | ✅ 已完成 | `util/log.ts` |
+| P0-3: MCP 超时默认值 | ✅ 已完成 | `mcp/index.ts` |
+| P0-4: LSP 协议关闭 | ✅ 已完成 | `lsp/client.ts` |
+| P1-1: Session diffs 优化 | ✅ 已完成 | `snapshot/index.ts` (增量优化) |
+| P1-2: 预算管理器限制 | ✅ 已完成 | `util/instance-memory-budget.ts` |
+| P1-3: LSP 缓存隔离 | ✅ 已完成 | `lsp/index.ts` (3处缓存键) |
+| P1-4: LSP 进程池限制 | ✅ 已完成 | `lsp/pool.ts` (全局池) |
+| P1-5: 全局并发限制器 | ✅ 已完成 | `util/concurrency-limiter.ts` |
+| P1-6: JSON.stringify 消除 | ✅ 已完成 | `session/processor.ts` (deepEqual) |
+| P1-7: Snapshot 增量 track | ✅ 已完成 | `snapshot/index.ts` (add -u) |
+| P1-8: LRU 缓存 | ✅ 已完成 | `util/cache.ts` |
+
+## 修改的文件清单
+
+### 新增文件
+- `src/__tests__/memory-guard.test.ts` - MemoryGuard 单元测试
+- `src/__tests__/log-cleanup.test.ts` - 日志清理单元测试
+- `src/__tests__/concurrency-limiter.test.ts` - 并发限制器单元测试
+- `src/util/concurrency-limiter.ts` - 全局并发限制器
+
+### 修改文件
+- `src/util/memory-guard.ts` - 修复回调泄漏
+- `src/util/log.ts` - 修复日志清理逻辑，添加定时清理
+- `src/util/instance-memory-budget.ts` - 添加 LRU 实例限制
+- `src/util/cache.ts` - 实现 LRU 缓存
+- `src/mcp/index.ts` - 添加超时默认值
+- `src/lsp/client.ts` - 规范化 LSP 关闭流程
+- `src/lsp/index.ts` - LSP 缓存添加项目隔离
+- `src/session/processor.ts` - 消除 JSON.stringify
+- `src/snapshot/index.ts` - 优化增量 track
 
 ## 一、优化目标
 

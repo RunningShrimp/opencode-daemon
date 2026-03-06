@@ -21,7 +21,7 @@ export function Footer() {
   return (
     <footer data-component="footer">
       <div data-slot="cell">
-        <a href={config.github.repoUrl} target="_blank">
+        <a href={config.github.repoUrl} target="_blank" rel="noopener noreferrer">
           {i18n.t("footer.github")} <span>[{starCount()}]</span>
         </a>
       </div>

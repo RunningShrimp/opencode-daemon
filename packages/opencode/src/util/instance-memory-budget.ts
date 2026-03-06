@@ -1,6 +1,19 @@
+/**
+ * Instance Memory Budget Manager
+ *
+ * Manages memory budgets for multiple instances/projects.
+ * Implements LRU eviction when the maximum number of instances is exceeded.
+ */
+
 import { Log } from "@/util/log"
 
 const log = Log.create({ service: "instance-memory-budget" })
+
+/**
+ * Maximum number of budget instances to keep in memory.
+ * When exceeded, the least recently used instance will be evicted.
+ */
+const MAX_BUDGET_INSTANCES = 100
 
 export interface InstanceMemoryBudgetConfig {
   maxMemory: number
@@ -210,16 +223,67 @@ export class InstanceMemoryBudget {
   }
 }
 
+/**
+ * InstanceMemoryBudgetManager manages multiple budget instances with LRU eviction.
+ *
+ * When the number of instances exceeds MAX_BUDGET_INSTANCES,
+ * the least recently used instance is automatically evicted.
+ */
 class InstanceMemoryBudgetManager {
   private budgets = new Map<string, InstanceMemoryBudget>()
+  private accessOrder: string[] = [] // Track access order for LRU eviction
 
+  /**
+   * Get or create a budget for the given instance ID.
+   * Implements LRU eviction when max instances is exceeded.
+   */
   getOrCreate(id: string): InstanceMemoryBudget {
-    let budget = this.budgets.get(id)
-    if (!budget) {
-      budget = new InstanceMemoryBudget()
-      this.budgets.set(id, budget)
+    // If exists, update access order and return
+    if (this.budgets.has(id)) {
+      this.updateAccessOrder(id)
+      return this.budgets.get(id)!
     }
+
+    // Evict oldest instance if at capacity
+    if (this.budgets.size >= MAX_BUDGET_INSTANCES) {
+      this.evictOldest()
+    }
+
+    // Create new budget
+    const budget = new InstanceMemoryBudget()
+    this.budgets.set(id, budget)
+    this.accessOrder.push(id)
+
     return budget
+  }
+
+  /**
+   * Update access order for LRU tracking
+   */
+  private updateAccessOrder(id: string): void {
+    const index = this.accessOrder.indexOf(id)
+    if (index > -1) {
+      this.accessOrder.splice(index, 1)
+      this.accessOrder.push(id)
+    }
+  }
+
+  /**
+   * Evict the least recently used instance
+   */
+  private evictOldest(): void {
+    if (this.accessOrder.length === 0) {
+      return
+    }
+
+    const oldestId = this.accessOrder.shift()!
+    const budget = this.budgets.get(oldestId)
+
+    if (budget) {
+      budget.destroy()
+      this.budgets.delete(oldestId)
+      log.info("Evicted oldest budget instance", { id: oldestId, remaining: this.budgets.size })
+    }
   }
 
   remove(id: string): void {
@@ -227,6 +291,12 @@ class InstanceMemoryBudgetManager {
     if (budget) {
       budget.destroy()
       this.budgets.delete(id)
+
+      // Update access order
+      const index = this.accessOrder.indexOf(id)
+      if (index > -1) {
+        this.accessOrder.splice(index, 1)
+      }
     }
   }
 
@@ -235,6 +305,21 @@ class InstanceMemoryBudgetManager {
       b.destroy()
     }
     this.budgets.clear()
+    this.accessOrder = []
+  }
+
+  /**
+   * Get current instance count
+   */
+  getInstanceCount(): number {
+    return this.budgets.size
+  }
+
+  /**
+   * Get all instance IDs
+   */
+  getInstanceIds(): string[] {
+    return Array.from(this.budgets.keys())
   }
 }
 

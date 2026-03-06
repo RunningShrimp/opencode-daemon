@@ -262,7 +262,7 @@ export default function BlackLayout(props: RouteSectionProps) {
           <span data-slot="anomaly">
             ©{new Date().getFullYear()} <a href="https://anoma.ly">Anomaly</a>
           </span>
-          <a href={config.github.repoUrl} target="_blank">
+          <a href={config.github.repoUrl} target="_blank" rel="noopener noreferrer">
             {i18n.t("nav.github")} <span data-slot="github-stars">[{starCount()}]</span>
           </a>
           <a href={language.route("/docs")}>{i18n.t("nav.docs")}</a>

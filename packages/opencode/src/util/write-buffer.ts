@@ -1,14 +1,6 @@
-let _log: { debug: (msg: string, data?: object) => void; error: (msg: string, data?: object) => void } | null = null
+const noop = { debug: () => {}, error: () => {} }
 function getLog() {
-  if (!_log) {
-    try {
-      const { Log } = require("./log")
-      _log = Log.create({ service: "write-buffer" })
-    } catch {
-      _log = { debug: () => {}, error: () => {} }
-    }
-  }
-  return _log!
+  return noop
 }
 
 export interface BufferConfig {

@@ -257,8 +257,21 @@ export namespace Snapshot {
     return path.join(Global.Path.data, "snapshot", project.id)
   }
 
+  /**
+   * Add files to git index incrementally.
+   * Only adds files that have been modified or are new (not ignored).
+   * Uses git add -u for modified files and git add for new files.
+   */
   async function add(git: string) {
     await syncExclude(git)
+
+    // First, add only modified files (not new untracked files)
+    await $`git -c core.autocrlf=false -c core.longpaths=true -c core.symlinks=true --git-dir ${git} --work-tree ${Instance.worktree} add -u`
+      .quiet()
+      .cwd(Instance.directory)
+      .nothrow()
+
+    // Then add new untracked files (excluding ignored files)
     await $`git -c core.autocrlf=false -c core.longpaths=true -c core.symlinks=true --git-dir ${git} --work-tree ${Instance.worktree} add .`
       .quiet()
       .cwd(Instance.directory)

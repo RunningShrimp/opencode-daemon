@@ -8,6 +8,7 @@ import {
   Match,
   on,
   onMount,
+  onCleanup,
   Show,
   Switch,
   useContext,
@@ -182,13 +183,17 @@ export function Session() {
     return new CustomSpeedScroll(3)
   })
 
+  // 使用 AbortController 管理异步操作的生命周期，防止内存泄漏
+  const abortController = new AbortController()
   createEffect(async () => {
     await sync.session
-      .sync(route.sessionID)
+      .sync(route.sessionID, { signal: abortController.signal })
       .then(() => {
         if (scroll) scroll.scrollBy(100_000)
       })
       .catch((e) => {
+        // 忽略 abort 错误
+        if (e instanceof Error && e.name === "AbortError") return
         console.error(e)
         toast.show({
           message: `Session not found: ${route.sessionID}`,
@@ -196,6 +201,11 @@ export function Session() {
         })
         return navigate({ type: "home" })
       })
+  })
+
+  // 组件卸载时取消所有进行中的请求
+  onCleanup(() => {
+    abortController.abort()
   })
 
   const toast = useToast()
@@ -209,20 +219,32 @@ export function Session() {
   })
 
   let lastSwitch: string | undefined = undefined
-  sdk.event.on("message.part.updated", (evt) => {
-    const part = evt.properties.part
-    if (part.type !== "tool") return
-    if (part.sessionID !== route.sessionID) return
-    if (part.state.status !== "completed") return
-    if (part.id === lastSwitch) return
 
-    if (part.tool === "plan_exit") {
-      local.agent.set("build")
-      lastSwitch = part.id
-    } else if (part.tool === "plan_enter") {
-      local.agent.set("plan")
-      lastSwitch = part.id
+  // Handle tool execution completion to switch between plan/build modes
+  // Using onMount/onCleanup to properly manage event listener lifecycle
+  onMount(() => {
+    const handleMessagePartUpdated = (evt: { properties: { part: { type: string; sessionID: string; state: { status: string }; id: string; tool: string } } }) => {
+      const part = evt.properties.part
+      if (part.type !== "tool") return
+      if (part.sessionID !== route.sessionID) return
+      if (part.state.status !== "completed") return
+      if (part.id === lastSwitch) return
+
+      if (part.tool === "plan_exit") {
+        local.agent.set("build")
+        lastSwitch = part.id
+      } else if (part.tool === "plan_enter") {
+        local.agent.set("plan")
+        lastSwitch = part.id
+      }
     }
+
+    sdk.event.on("message.part.updated", handleMessagePartUpdated)
+
+    // Cleanup event listener on component unmount to prevent memory leaks
+    onCleanup(() => {
+      sdk.event.off("message.part.updated", handleMessagePartUpdated)
+    })
   })
 
   let scroll: ScrollBoxRenderable
@@ -1012,23 +1034,24 @@ export function Session() {
   // snap to bottom when session changes
   createEffect(on(() => route.sessionID, toBottom))
 
+  // 使用 useMemo 包装 Context value，避免每次渲染都创建新对象导致子组件不必要地重渲染
+  const contextValue = createMemo(() => ({
+    get width() {
+      return contentWidth()
+    },
+    sessionID: route.sessionID,
+    conceal,
+    showThinking,
+    showTimestamps,
+    showDetails,
+    showGenericToolOutput,
+    diffWrapMode,
+    sync,
+    tui: tuiConfig,
+  }))
+
   return (
-    <context.Provider
-      value={{
-        get width() {
-          return contentWidth()
-        },
-        sessionID: route.sessionID,
-        conceal,
-        showThinking,
-        showTimestamps,
-        showDetails,
-        showGenericToolOutput,
-        diffWrapMode,
-        sync,
-        tui: tuiConfig,
-      }}
-    >
+    <context.Provider value={contextValue()}>
       <box flexDirection="row">
         <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
           <Show when={session()}>

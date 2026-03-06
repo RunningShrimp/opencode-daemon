@@ -49,9 +49,16 @@ export namespace LSPClient {
     const l = log.clone().tag("serverID", input.serverID)
     l.info("starting client")
 
+    // Validate that stdio streams are available before creating the connection
+    if (!input.server.process.stdout || !input.server.process.stdin) {
+      throw new Error(
+        `LSP server ${input.serverID} process has invalid stdio streams`,
+      )
+    }
+
     const connection = createMessageConnection(
-      new StreamMessageReader(input.server.process.stdout as any),
-      new StreamMessageWriter(input.server.process.stdin as any),
+      new StreamMessageReader(input.server.process.stdout),
+      new StreamMessageWriter(input.server.process.stdin),
     )
 
     const diagnostics = new Map<string, Diagnostic[]>()
@@ -294,12 +301,58 @@ export namespace LSPClient {
             unsub?.()
           })
       },
+      /**
+       * Gracefully shutdown the LSP client following the LSP specification.
+       *
+       * According to the Language Server Protocol:
+       * 1. Send shutdown request
+       * 2. Receive shutdown response
+       * 3. Send exit notification
+       * 4. Then close connection and dispose
+       * 5. Finally kill the process if still alive
+       */
       async shutdown() {
-        l.info("shutting down")
-        connection.end()
-        connection.dispose()
-        input.server.process.kill()
-        l.info("shutdown")
+        l.info("shutting down lsp client")
+
+        try {
+          // Step 1-2: Send shutdown request and wait for response
+          await withTimeout(
+            connection.sendRequest("shutdown", {}),
+            5000,
+          ).catch(() => {
+            l.warn("shutdown request failed or timed out")
+          })
+
+          // Step 3: Send exit notification to allow server to clean up gracefully
+          connection.sendNotification("exit", {})
+
+          // Step 4: Wait a short time for graceful exit
+          await new Promise((resolve) => setTimeout(resolve, 500))
+        } catch (e) {
+          l.warn("error during lsp shutdown", { error: String(e) })
+        }
+
+        // Step 5: Force close connection and dispose resources
+        try {
+          connection.end()
+        } catch {
+          // Ignore errors during close
+        }
+
+        try {
+          connection.dispose()
+        } catch {
+          // Ignore errors during dispose
+        }
+
+        // Step 6: Kill the process if still alive
+        try {
+          input.server.process.kill()
+        } catch {
+          // Process may have already exited
+        }
+
+        l.info("lsp client shutdown complete")
       },
     }
 

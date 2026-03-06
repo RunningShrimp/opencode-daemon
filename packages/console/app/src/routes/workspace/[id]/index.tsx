@@ -40,7 +40,7 @@ export default function () {
         <p>
           <span>
             {i18n.t("workspace.home.banner.beforeLink")}{" "}
-            <a target="_blank" href={language.route("/docs/zen")}>
+            <a target="_blank" rel="noopener noreferrer" href={language.route("/docs/zen")}>
               {i18n.t("common.learnMore")}
             </a>
             .

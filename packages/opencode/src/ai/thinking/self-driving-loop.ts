@@ -500,6 +500,96 @@ ${expReport}
 `
   }
 
+  detectRemainingWork(): RemainingWorkReport {
+    const goal = this.loopState.currentGoal
+    if (!goal) return { hasRemaining: false, items: [], progress: 1, suggestedActions: [] }
+
+    const completed = this.getCompletedCriteria()
+    const remaining = goal.successCriteria.filter((c) => !completed.includes(c))
+
+    const progress = completed.length / goal.successCriteria.length
+
+    return {
+      hasRemaining: remaining.length > 0,
+      items: remaining,
+      progress,
+      suggestedActions: remaining.map((c) => `Address: ${c}`),
+    }
+  }
+
+  private getCompletedCriteria(): string[] {
+    return []
+  }
+
+  setupAutoContinueHooks(session: Session) {
+    session.on("tool_complete", async (result: any) => {
+      const remaining = this.detectRemainingWork()
+      if (remaining.hasRemaining && remaining.progress > 0.5) {
+        await this.autoContinue(remaining.suggestedActions[0])
+      }
+    })
+  }
+
+  private async autoContinue(action: string) {
+    this.monitor.transitionState(AgentState.EXECUTING)
+
+    const decision: LoopDecision = {
+      phase: LoopPhase.ACTING,
+      action,
+      reasoning: `Auto-continue triggered: progress > 50%`,
+      expectedOutcome: `Continue with ${action}`,
+    }
+
+    await this.act()
+  }
+
+  getProgress(): number {
+    const goal = this.loopState.currentGoal
+    if (!goal) return 0
+
+    const completed = this.getCompletedCriteria()
+    return completed.length / goal.successCriteria.length
+  }
+
+  private persistProgress(): void {
+    if (!this.loopState.currentGoal) return
+
+    const state: GoalProgressState = {
+      goalId: this.loopState.currentGoal.id,
+      progress: this.getProgress(),
+      completedCriteria: this.getCompletedCriteria(),
+      timestamp: Date.now(),
+    }
+
+    this.progressHistory.push(state)
+  }
+
+  private loadProgress(goalId: string): GoalProgressState | null {
+    const state = this.progressHistory.find((s) => s.goalId === goalId)
+    return state || null
+  }
+
+  async saveGoalState(): Promise<void> {
+    await this.persistProgress()
+  }
+
+  async loadGoalState(goalId: string): Promise<void> {
+    const state = await this.loadProgress(goalId)
+    if (state) {
+      this.restoreFromState(state)
+    }
+  }
+
+  private restoreFromState(state: GoalProgressState) {
+    this.loopState.currentGoal = {
+      ...state,
+      progress: state.progress,
+      completedCriteria: state.completedCriteria,
+    }
+    this.decisionHistory = []
+    this.stepCount = 0
+  }
+
   reset(): void {
     this.monitor = new SelfMonitor()
     this.metacognition = new MetacognitionEngine(this.monitor)
@@ -518,5 +608,67 @@ ${expReport}
     }
     this.decisionHistory = []
     this.stepCount = 0
+    this.progressHistory = []
   }
+}
+    this.decisionHistory = []
+    this.stepCount = 0
+  }
+
+  detectRemainingWork(): RemainingWorkReport {
+    const goal = this.loopState.currentGoal
+    if (!goal) return { hasRemaining: false, items: [], progress: 1, suggestedActions: [] }
+
+    const completed = this.getCompletedCriteria()
+    const remaining = goal.successCriteria.filter((c) => !completed.includes(c))
+    const progress = completed.length / goal.successCriteria.length
+
+    return {
+      hasRemaining: remaining.length > 0,
+      items: remaining,
+      progress,
+      suggestedActions: remaining.map((r) => `Address: ${r}`),
+    }
+  }
+
+  private getCompletedCriteria(): string[] {
+    const completed: string[] = []
+    const goal = this.loopState.currentGoal
+    if (!goal) return completed
+
+    for (const criterion of goal.successCriteria) {
+      if (this.isCriterionMet(criterion)) {
+        completed.push(criterion)
+      }
+    }
+    return completed
+  }
+
+  private isCriterionMet(criterion: string): boolean {
+    const state = this.monitor.getState()
+    if (criterion.includes("complete") || criterion.includes("done")) {
+      return state.confidence > 0.8 && state.consecutiveErrors === 0
+    }
+    return false
+  }
+
+  setupAutoContinueHooks(session: { on: (event: string, handler: (result: any) => Promise<void>) => void }) {
+    session.on("tool_complete", async (result) => {
+      const remaining = this.detectRemainingWork()
+      if (remaining.hasRemaining && remaining.progress > 0.5) {
+        await this.autoContinue(remaining.suggestedActions[0])
+      }
+    })
+  }
+
+  private async autoContinue(action: string) {
+    await this.act()
+  }
+}
+
+export interface RemainingWorkReport {
+  hasRemaining: boolean
+  items: string[]
+  progress: number
+  suggestedActions: string[]
 }

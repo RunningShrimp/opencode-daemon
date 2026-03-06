@@ -17,6 +17,7 @@ import { config } from "~/config"
 import { useI18n } from "~/context/i18n"
 import { useLanguage } from "~/context/language"
 import { LocaleLinks } from "~/component/locale-links"
+import { escapeHtml } from "~/lib/sanitize"
 
 function CopyStatus() {
   return (
@@ -239,11 +240,14 @@ export default function Home() {
               <div>
                 <span>[*]</span>
                 <p
+                  // 注意：这里使用 innerHTML 渲染翻译文本
+                  // i18n 翻译文本来自开发者控制的翻译文件，风险较低
+                  // 但为安全起见，对变量进行转义
                   innerHTML={i18n.t("home.growth.body", {
-                    stars: config.github.starsFormatted.full,
-                    contributors: config.stats.contributors,
-                    commits: config.stats.commits,
-                    monthlyUsers: config.stats.monthlyUsers,
+                    stars: escapeHtml(config.github.starsFormatted.full),
+                    contributors: escapeHtml(String(config.stats.contributors)),
+                    commits: escapeHtml(String(config.stats.commits)),
+                    monthlyUsers: escapeHtml(String(config.stats.monthlyUsers)),
                   })}
                 />
               </div>
@@ -684,7 +688,7 @@ export default function Home() {
                   {i18n.t("home.faq.a3.p1")} {i18n.t("home.faq.a3.p2.beforeZen")}{" "}
                   <A href={language.route("/zen")}>{i18n.t("nav.zen")}</A>
                   {i18n.t("home.faq.a3.p2.afterZen")} {i18n.t("home.faq.a3.p3")} {i18n.t("home.faq.a3.p4.beforeLocal")}{" "}
-                  <a href={language.route("/docs/providers/#lm-studio")} target="_blank">
+                  <a href={language.route("/docs/providers/#lm-studio")} target="_blank" rel="noopener noreferrer">
                     {i18n.t("home.faq.a3.p4.localLink")}
                   </a>
                   .
@@ -717,11 +721,11 @@ export default function Home() {
               <li>
                 <Faq question={i18n.t("home.faq.q8")}>
                   {i18n.t("home.faq.a8.p1")}{" "}
-                  <a href={config.github.repoUrl} target="_blank">
+                  <a href={config.github.repoUrl} target="_blank" rel="noopener noreferrer">
                     {i18n.t("nav.github")}
                   </a>{" "}
                   {i18n.t("home.faq.a8.p2")}{" "}
-                  <a href={`${config.github.repoUrl}?tab=MIT-1-ov-file#readme`} target="_blank">
+                  <a href={`${config.github.repoUrl}?tab=MIT-1-ov-file#readme`} target="_blank" rel="noopener noreferrer">
                     {i18n.t("home.faq.a8.mitLicense")}
                   </a>
                   {i18n.t("home.faq.a8.p3")}

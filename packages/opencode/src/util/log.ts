@@ -1,3 +1,10 @@
+/**
+ * Log Module
+ *
+ * Provides structured logging with file and console output.
+ * Implements log rotation and cleanup to prevent disk space leaks.
+ */
+
 import path from "path"
 import fs from "fs/promises"
 import { createWriteStream } from "fs"
@@ -5,6 +12,22 @@ import { Global } from "../global"
 import z from "zod"
 import { Glob } from "./glob"
 import { WriteBuffer } from "./write-buffer"
+
+/**
+ * Maximum number of log files to retain
+ * Used to prevent disk space exhaustion
+ */
+const MAX_LOG_FILES = 5
+
+/**
+ * Log cleanup interval in milliseconds (1 hour)
+ */
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000
+
+/**
+ * Reference to the cleanup interval timer
+ */
+let cleanupIntervalId: ReturnType<typeof setInterval> | null = null
 
 export namespace Log {
   export const Level = z.enum(["DEBUG", "INFO", "WARN", "ERROR"]).meta({ ref: "LogLevel", description: "Log level" })
@@ -59,10 +82,83 @@ export namespace Log {
   }
   let buffer: WriteBuffer | null = null
 
+  /**
+   * Clean up old log files in the specified directory
+   * Keeps only the most recent MAX_LOG_FILES
+   * Exported as a namespace member for testing
+   */
+  export async function cleanupLogs(dir: string): Promise<void> {
+    try {
+      const files = await Glob.scan("????-??-??T??????.log", {
+        cwd: dir,
+        absolute: true,
+        include: "file",
+      })
+
+      // No cleanup needed if at or below the limit
+      if (files.length <= MAX_LOG_FILES) {
+        return
+      }
+
+      // Sort files by name (which represents timestamp)
+      const sortedFiles = files.sort((a, b) => a.localeCompare(b))
+
+      // Delete all but the most recent MAX_LOG_FILES
+      const filesToDelete = sortedFiles.slice(0, sortedFiles.length - MAX_LOG_FILES)
+
+      // Delete in parallel
+      await Promise.all(
+        filesToDelete.map(async (file) => {
+          try {
+            await fs.unlink(file)
+          } catch {
+            // Ignore errors during deletion
+          }
+        })
+      )
+    } catch {
+      // Silently ignore cleanup errors to prevent affecting main functionality
+    }
+  }
+
+  /**
+   * Start periodic log cleanup
+   * Cleans up old log files every hour
+   */
+  function startPeriodicCleanup(): void {
+    if (cleanupIntervalId !== null) {
+      return // Already running
+    }
+
+    cleanupIntervalId = setInterval(() => {
+      cleanupLogs(Global.Path.log).catch(() => {})
+    }, CLEANUP_INTERVAL_MS)
+
+    // Allow the timer to not prevent process exit
+    cleanupIntervalId.unref()
+  }
+
+  /**
+   * Stop periodic log cleanup
+   */
+  export function stopPeriodicCleanup(): void {
+    if (cleanupIntervalId !== null) {
+      clearInterval(cleanupIntervalId)
+      cleanupIntervalId = null
+    }
+  }
+
   export async function init(options: Options) {
     if (options.level) level = options.level
-    cleanup(Global.Path.log)
+
+    // Initial cleanup on startup
+    await cleanupLogs(Global.Path.log)
+
+    // Start periodic cleanup
+    startPeriodicCleanup()
+
     if (options.print) return
+
     logpath = path.join(
       Global.Path.log,
       options.dev ? "dev.log" : new Date().toISOString().split(".")[0].replace(/:/g, "") + ".log",
@@ -86,18 +182,6 @@ export namespace Log {
       buffer?.write(data)
       return data.length
     }
-  }
-
-  async function cleanup(dir: string) {
-    const files = await Glob.scan("????-??-??T??????.log", {
-      cwd: dir,
-      absolute: true,
-      include: "file",
-    })
-    if (files.length <= 5) return
-
-    const filesToDelete = files.slice(0, -10)
-    await Promise.all(filesToDelete.map((file) => fs.unlink(file).catch(() => {})))
   }
 
   function formatError(error: Error, depth = 0): string {

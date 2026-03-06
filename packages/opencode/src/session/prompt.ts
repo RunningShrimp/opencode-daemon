@@ -46,6 +46,8 @@ import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
 import { getController } from "@/util/dynamic-turn-control"
+import { getImageRouter, processImages } from "./image-router"
+import { Config } from "../config/config"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -1361,6 +1363,38 @@ export namespace SessionPrompt {
         ]
       }),
     ).then((x) => x.flat().map(assign))
+
+    // Image understanding: detect and interpret images in the message
+    try {
+      const config = await Config.get()
+      if (config.imageUnderstanding?.enabled !== false) {
+        const imageInterpretation = await processImages(input.parts, "", {
+          currentModel: model,
+          preferMcp: config.imageUnderstanding?.preferMcp,
+          budget: config.imageUnderstanding?.budget,
+          sessionID: input.sessionID,
+        })
+
+        if (imageInterpretation && !imageInterpretation.isFallback) {
+          // Add interpretation as a synthetic text part
+          const interpretationPart: Draft<MessageV2.Part> = {
+            messageID: info.id,
+            sessionID: input.sessionID,
+            type: "text",
+            synthetic: true,
+            text: `[Image Understanding]\n${imageInterpretation.text}`,
+          }
+          parts.push(interpretationPart)
+          log.debug("added image interpretation", {
+            strategy: imageInterpretation.strategy.type,
+            processingTime: imageInterpretation.processingTime,
+          })
+        }
+      }
+    } catch (error) {
+      // Log error but don't fail message creation
+      log.error("image understanding failed", { error })
+    }
 
     await Plugin.trigger(
       "chat.message",

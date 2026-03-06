@@ -1000,7 +1000,10 @@ export namespace LSP {
 
   export async function hover(input: { file: string; line: number; character: number }): Promise<unknown> {
     const startTime = Date.now()
-    const cacheKey = `${input.file}:${input.line}:${input.character}`
+    // Include project directory in cache key for project isolation
+    const projectRoot = Instance.directory
+    const relativeFile = path.relative(projectRoot, input.file)
+    const cacheKey = `${projectRoot}:${relativeFile}:${input.line}:${input.character}`
 
     // Check cache first
     const cached = hoverCache.get(cacheKey)
@@ -1104,8 +1107,12 @@ export namespace LSP {
       return []
     }
 
+    // Include project directory in cache key for project isolation
+    const projectRoot = Instance.directory
+    const cacheKey = `${projectRoot}:${query}`
+
     // Check cache first
-    const cached = symbolCache.get(query)
+    const cached = symbolCache.get(cacheKey)
     if (cached !== undefined) {
       metrics.record("workspaceSymbol", Date.now() - startTime, true, true)
       return cached as LSP.Symbol[]
@@ -1200,8 +1207,10 @@ export namespace LSP {
 
   export async function definition(input: { file: string; line: number; character: number }): Promise<unknown[]> {
     const startTime = Date.now()
-    // Check cache first
-    const cacheKey = `def:${input.file}:${input.line}:${input.character}`
+    // Include project directory in cache key for project isolation
+    const projectRoot = Instance.directory
+    const relativeFile = path.relative(projectRoot, input.file)
+    const cacheKey = `def:${projectRoot}:${relativeFile}:${input.line}:${input.character}`
     const cached = definitionCache.get(cacheKey)
     if (cached !== undefined) {
       metrics.record("definition", Date.now() - startTime, true, true)

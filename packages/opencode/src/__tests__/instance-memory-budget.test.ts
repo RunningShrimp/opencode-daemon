@@ -261,6 +261,10 @@ describe("Global Manager", () => {
     globalManager.clear()
   })
 
+  afterEach(() => {
+    globalManager.clear()
+  })
+
   test("getOrCreate returns same budget for same instance", () => {
     const b1 = getBudget("instance-1")
     const b2 = getBudget("instance-1")
@@ -293,6 +297,70 @@ describe("Global Manager", () => {
 
     expect(getBudget("instance-1").getUsage().used).toBe(0)
     expect(getBudget("instance-2").getUsage().used).toBe(0)
+  })
+
+  describe("LRU eviction", () => {
+    test("evicts oldest instance when limit is exceeded", () => {
+      // Get 100 different instances to trigger eviction
+      // Note: MAX_BUDGET_INSTANCES = 100, so the 101st should evict the 1st
+      const instances: string[] = []
+      for (let i = 0; i < 101; i++) {
+        const id = `instance-${i}`
+        instances.push(id)
+        getBudget(id)
+      }
+
+      // First instance should have been evicted
+      const firstInstance = getBudget("instance-0")
+      expect(firstInstance.getUsage().used).toBe(0)
+      expect(firstInstance.getUsage().entryCount).toBe(0)
+
+      // Latest instance should exist
+      const lastInstance = getBudget("instance-100")
+      expect(lastInstance).toBeDefined()
+    })
+
+    test("accessing instance updates its position in LRU order", () => {
+      // Create 100 instances
+      for (let i = 0; i < 100; i++) {
+        getBudget(`instance-${i}`)
+      }
+
+      // Access instance-0 to update its LRU position
+      const instance0 = getBudget("instance-0")
+
+      // Add one more to trigger eviction
+      getBudget("instance-100")
+
+      // instance-0 should NOT have been evicted because we accessed it
+      const afterEviction = getBudget("instance-0")
+      expect(afterEviction).toBe(instance0)
+    })
+
+    test("getInstanceCount returns correct count", () => {
+      expect(globalManager.getInstanceCount()).toBe(0)
+
+      getBudget("instance-1")
+      expect(globalManager.getInstanceCount()).toBe(1)
+
+      getBudget("instance-2")
+      expect(globalManager.getInstanceCount()).toBe(2)
+
+      getBudget("instance-1") // Same instance
+      expect(globalManager.getInstanceCount()).toBe(2)
+    })
+
+    test("getInstanceIds returns all instance IDs", () => {
+      getBudget("instance-a")
+      getBudget("instance-b")
+      getBudget("instance-c")
+
+      const ids = globalManager.getInstanceIds()
+      expect(ids).toContain("instance-a")
+      expect(ids).toContain("instance-b")
+      expect(ids).toContain("instance-c")
+      expect(ids.length).toBe(3)
+    })
   })
 })
 

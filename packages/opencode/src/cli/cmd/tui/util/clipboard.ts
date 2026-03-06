@@ -8,6 +8,32 @@ import { Filesystem } from "../../../../util/filesystem"
 import { Process } from "../../../../util/process"
 
 /**
+ * Platform detection utilities for clipboard operations
+ */
+
+const DEFAULT_TIMEOUT_MS = 10_000 // 10 seconds timeout for clipboard operations
+
+/**
+ * Check if running in WSL (Windows Subsystem for Linux)
+ * Uses multiple detection methods for reliability
+ */
+function isWSL(): boolean {
+  if (platform() !== "win32") return false
+
+  // Check WSL_DISTRO_NAME environment variable (most reliable)
+  if (process.env.WSL_DISTRO_NAME) return true
+
+  // Check /proc/version for WSL indicators
+  try {
+    const version = $`uname -r`.text().toLowerCase()
+    return version.includes("microsoft") || version.includes("wsl")
+  } catch {
+    // Fallback: check release string
+    return release().toLowerCase().includes("wsl")
+  }
+}
+
+/**
  * Writes text to clipboard via OSC 52 escape sequence.
  * This allows clipboard operations to work over SSH by having
  * the terminal emulator handle the clipboard locally.
@@ -32,44 +58,79 @@ export namespace Clipboard {
 
     if (os === "darwin") {
       const tmpfile = path.join(tmpdir(), "opencode-clipboard.png")
+      // Escape single quotes in path for shell safety
+      const escapedTmpfile = tmpfile.replace(/'/g, "'\\''")
       try {
-        await $`osascript -e 'set imageData to the clipboard as "PNGf"' -e 'set fileRef to open for access POSIX file "${tmpfile}" with write permission' -e 'set eof fileRef to 0' -e 'write imageData to fileRef' -e 'close access fileRef'`
-          .nothrow()
-          .quiet()
+        // Use timeout to prevent hanging on clipboard issues
+        await withTimeout(
+          $`osascript -e 'set imageData to the clipboard as "PNGf"' -e 'set fileRef to open for access POSIX file '${escapedTmpfile}' with write permission' -e 'set eof fileRef to 0' -e 'write imageData to fileRef' -e 'close access fileRef'`
+            .nothrow()
+            .quiet(),
+          DEFAULT_TIMEOUT_MS,
+        )
         const buffer = await Filesystem.readBytes(tmpfile)
         return { data: buffer.toString("base64"), mime: "image/png" }
       } catch {
+        // Timeout or error - clipboard may be empty or inaccessible
       } finally {
         await $`rm -f "${tmpfile}"`.nothrow().quiet()
       }
     }
 
-    if (os === "win32" || release().includes("WSL")) {
+    // Use improved WSL detection
+    const isRunningInWSL = isWSL()
+    if (os === "win32" || isRunningInWSL) {
       const script =
         "Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [System.Convert]::ToBase64String($ms.ToArray()) }"
-      const base64 = await $`powershell.exe -NonInteractive -NoProfile -command "${script}"`.nothrow().text()
-      if (base64) {
-        const imageBuffer = Buffer.from(base64.trim(), "base64")
-        if (imageBuffer.length > 0) {
-          return { data: imageBuffer.toString("base64"), mime: "image/png" }
+      try {
+        const base64 = await withTimeout(
+          $`powershell.exe -NonInteractive -NoProfile -command "${script}"`.nothrow().text(),
+          DEFAULT_TIMEOUT_MS,
+        )
+        if (base64) {
+          const imageBuffer = Buffer.from(base64.trim(), "base64")
+          if (imageBuffer.length > 0) {
+            return { data: imageBuffer.toString("base64"), mime: "image/png" }
+          }
         }
+      } catch {
+        // Timeout or error
       }
     }
 
     if (os === "linux") {
-      const wayland = await $`wl-paste -t image/png`.nothrow().arrayBuffer()
-      if (wayland && wayland.byteLength > 0) {
-        return { data: Buffer.from(wayland).toString("base64"), mime: "image/png" }
+      try {
+        const wayland = await withTimeout(
+          $`wl-paste -t image/png`.nothrow().arrayBuffer(),
+          DEFAULT_TIMEOUT_MS,
+        )
+        if (wayland && wayland.byteLength > 0) {
+          return { data: Buffer.from(wayland).toString("base64"), mime: "image/png" }
+        }
+      } catch {
+        // Timeout or error, try x11 fallback
       }
-      const x11 = await $`xclip -selection clipboard -t image/png -o`.nothrow().arrayBuffer()
-      if (x11 && x11.byteLength > 0) {
-        return { data: Buffer.from(x11).toString("base64"), mime: "image/png" }
+      try {
+        const x11 = await withTimeout(
+          $`xclip -selection clipboard -t image/png -o`.nothrow().arrayBuffer(),
+          DEFAULT_TIMEOUT_MS,
+        )
+        if (x11 && x11.byteLength > 0) {
+          return { data: Buffer.from(x11).toString("base64"), mime: "image/png" }
+        }
+      } catch {
+        // Timeout or error
       }
     }
 
-    const text = await clipboardy.read().catch(() => {})
-    if (text) {
-      return { data: text, mime: "text/plain" }
+    // Fallback to clipboardy with timeout
+    try {
+      const text = await withTimeout(clipboardy.read(), DEFAULT_TIMEOUT_MS)
+      if (text) {
+        return { data: text, mime: "text/plain" }
+      }
+    } catch {
+      // Timeout or error
     }
   }
 
