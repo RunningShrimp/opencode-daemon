@@ -33,6 +33,8 @@ import path from "path"
 import { Global } from "./global"
 import { JsonMigration } from "./storage/json-migration"
 import { Database } from "./storage/db"
+import { destroyAll, LifecycleEvent } from "./util/lifecycle"
+import { Bus } from "./bus"
 
 process.on("unhandledRejection", (e) => {
   Log.Default.error("rejection", {
@@ -203,9 +205,8 @@ try {
   }
   process.exitCode = 1
 } finally {
-  // Some subprocesses don't react properly to SIGTERM and similar signals.
-  // Most notably, some docker-container-based MCP servers don't handle such signals unless
-  // run using `docker run --init`.
-  // Explicitly exit to avoid any hanging subprocesses.
+  Bus.publish(LifecycleEvent.Shutdown, {})
+  await destroyAll()
+  await Log.flush()
   process.exit()
 }

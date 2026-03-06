@@ -11,6 +11,7 @@ import { Instance } from "../project/instance"
 import { assertExternalDirectory } from "./external-directory"
 import { InstructionPrompt } from "../session/instruction"
 import { Filesystem } from "../util/filesystem"
+import { getHashline } from "../util/hashline"
 
 const DEFAULT_READ_LIMIT = 2000
 const MAX_LINE_LENGTH = 2000
@@ -24,6 +25,10 @@ export const ReadTool = Tool.define("read", {
     filePath: z.string().describe("The absolute path to the file or directory to read"),
     offset: z.coerce.number().describe("The line number to start reading from (1-indexed)").optional(),
     limit: z.coerce.number().describe("The maximum number of lines to read (defaults to 2000)").optional(),
+    withHash: z
+      .boolean()
+      .describe("Include line hashes for precise editing (format: lineNumber#hash|content)")
+      .optional(),
   }),
   async execute(params, ctx) {
     if (params.offset !== undefined && params.offset < 1) {
@@ -111,6 +116,7 @@ export const ReadTool = Tool.define("read", {
           preview: sliced.slice(0, 20).join("\n"),
           truncated,
           loaded: [] as string[],
+          revision: undefined,
         },
       }
     }
@@ -130,6 +136,7 @@ export const ReadTool = Tool.define("read", {
           preview: msg,
           truncated: false,
           loaded: instructions.map((i) => i.filepath),
+          revision: undefined,
         },
         attachments: [
           {
@@ -190,13 +197,25 @@ export const ReadTool = Tool.define("read", {
       throw new Error(`Offset ${offset} is out of range for this file (${lines} lines)`)
     }
 
+    const hashline = params.withHash ? getHashline() : null
     const content = raw.map((line, index) => {
-      return `${index + offset}: ${line}`
+      const lineNum = index + offset
+      if (hashline) {
+        const hash = hashline.computeLineHash(lineNum, line)
+        return `${lineNum}#${hash}|${line}`
+      }
+      return `${lineNum}: ${line}`
     })
     const preview = raw.slice(0, 20).join("\n")
 
-    let output = [`<path>${filepath}</path>`, `<type>file</type>`, "<content>"].join("\n")
-    output += content.join("\n")
+    const fileRevision = hashline ? hashline.computeFileRevision(raw.join("\n")) : undefined
+
+    let outputParts = [`<path>${filepath}</path>`, `<type>file</type>`]
+    if (fileRevision) {
+      outputParts.push(`<revision>${fileRevision}</revision>`)
+    }
+    outputParts.push("<content>")
+    let output = outputParts.join("\n") + "\n" + content.join("\n")
 
     const totalLines = lines
     const lastReadLine = offset + raw.length - 1
@@ -227,6 +246,7 @@ export const ReadTool = Tool.define("read", {
         preview,
         truncated,
         loaded: instructions.map((i) => i.filepath),
+        ...(fileRevision ? { revision: fileRevision } : {}),
       },
     }
   },

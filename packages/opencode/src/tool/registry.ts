@@ -30,6 +30,9 @@ import { Truncate } from "./truncation"
 import { ApplyPatchTool } from "./apply_patch"
 import { Glob } from "../util/glob"
 import { pathToFileURL } from "url"
+import { SelfCritiqueTool } from "@/ai/tools/self-critique"
+import { ReviewVerifyTool } from "@/ai/tools/review-verify"
+import { EvidenceGatherTool } from "@/ai/tools/evidence-gather"
 
 export namespace ToolRegistry {
   const log = Log.create({ service: "tool.registry" })
@@ -120,6 +123,7 @@ export namespace ToolRegistry {
       ...(Flag.OPENCODE_EXPERIMENTAL_LSP_TOOL ? [LspTool] : []),
       ...(config.experimental?.batch_tool === true ? [BatchTool] : []),
       ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [PlanExitTool] : []),
+      ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE ? [SelfCritiqueTool, ReviewVerifyTool, EvidenceGatherTool] : []),
       ...custom,
     ]
   }

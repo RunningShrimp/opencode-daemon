@@ -17,6 +17,7 @@ import { Filesystem } from "../util/filesystem"
 import { Instance } from "../project/instance"
 import { Snapshot } from "@/snapshot"
 import { assertExternalDirectory } from "./external-directory"
+import { getHashline } from "../util/hashline"
 
 const MAX_DIAGNOSTICS_PER_FILE = 20
 
@@ -31,6 +32,14 @@ export const EditTool = Tool.define("edit", {
     oldString: z.string().describe("The text to replace"),
     newString: z.string().describe("The text to replace it with (must be different from oldString)"),
     replaceAll: z.boolean().optional().describe("Replace all occurrences of oldString (default false)"),
+    hashAnchor: z
+      .string()
+      .optional()
+      .describe("Line hash anchor for verification (format: lineNumber#hash, e.g., '42#a3f')"),
+    hashRange: z
+      .string()
+      .optional()
+      .describe("Range hash for multi-line verification (format: startLine#hash-endLine#hash, e.g., '10#a3f-15#b2c')"),
   }),
   async execute(params, ctx) {
     if (!params.filePath) {
@@ -65,10 +74,7 @@ export const EditTool = Tool.define("edit", {
         await Bus.publish(File.Event.Edited, {
           file: filePath,
         })
-        await Bus.publish(FileWatcher.Event.Updated, {
-          file: filePath,
-          event: existed ? "change" : "add",
-        })
+        // 不再发布 FileWatcher.Event.Updated，因为 Parcel watcher 会自动检测到文件变化
         FileTime.read(ctx.sessionID, filePath)
         return
       }
@@ -78,6 +84,61 @@ export const EditTool = Tool.define("edit", {
       if (stats.isDirectory()) throw new Error(`Path is a directory, not a file: ${filePath}`)
       await FileTime.assert(ctx.sessionID, filePath)
       contentOld = await Filesystem.readText(filePath)
+
+      if (params.hashAnchor || params.hashRange) {
+        const hashline = getHashline()
+
+        if (params.hashRange) {
+          const range = hashline.parseFormattedRange(params.hashRange)
+          if (!range) {
+            throw new Error(
+              `Invalid hashRange format: ${params.hashRange}. Expected format: 'startLine#hash-endLine#hash'`,
+            )
+          }
+          const verifyResult = hashline.verifyRange(filePath, range, contentOld)
+          if (!verifyResult.valid) {
+            const lines = contentOld.split("\n")
+            const ctxStart = Math.max(1, range.start.line - 2)
+            const ctxEnd = Math.min(lines.length, range.end.line + 2)
+            const context = []
+            for (let i = ctxStart; i <= ctxEnd; i++) {
+              const hash = hashline.computeLineHash(i, lines[i - 1])
+              context.push(`  ${i}#${hash}|${lines[i - 1]}`)
+            }
+            throw new Error(
+              `Hash verification failed for range ${params.hashRange}.\n` +
+                `Code: ${verifyResult.code || "unknown"}\n` +
+                `Current context:\n${context.join("\n")}\n\n` +
+                `Please re-read the file to get updated hashes.`,
+            )
+          }
+        } else if (params.hashAnchor) {
+          const match = params.hashAnchor.match(/^(\d+)#([a-f0-9]+)$/)
+          if (!match) {
+            throw new Error(`Invalid hashAnchor format: ${params.hashAnchor}. Expected format: 'lineNumber#hash'`)
+          }
+          const lineNum = parseInt(match[1], 10)
+          const hash = match[2]
+          const verifyResult = hashline.verify(filePath, lineNum, hash, contentOld)
+          if (!verifyResult.valid) {
+            const lines = contentOld.split("\n")
+            const ctxStart = Math.max(1, lineNum - 2)
+            const ctxEnd = Math.min(lines.length, lineNum + 2)
+            const context = []
+            for (let i = ctxStart; i <= ctxEnd; i++) {
+              const h = hashline.computeLineHash(i, lines[i - 1])
+              context.push(`  ${i}#${h}|${lines[i - 1]}`)
+            }
+            let msg = `Hash verification failed at line ${lineNum}. Expected hash ${hash}, got ${verifyResult.actualHash}.\nCurrent context:\n${context.join("\n")}`
+            if (verifyResult.candidates && verifyResult.candidates.length > 0) {
+              msg += `\n\nPossible matching lines: ${verifyResult.candidates.map((c) => `line ${c.number}`).join(", ")}`
+            }
+            msg += "\n\nPlease re-read the file to get updated hashes."
+            throw new Error(msg)
+          }
+        }
+      }
+
       contentNew = replace(contentOld, params.oldString, params.newString, params.replaceAll)
 
       diff = trimDiff(
@@ -97,10 +158,7 @@ export const EditTool = Tool.define("edit", {
       await Bus.publish(File.Event.Edited, {
         file: filePath,
       })
-      await Bus.publish(FileWatcher.Event.Updated, {
-        file: filePath,
-        event: "change",
-      })
+      // 不再发布 FileWatcher.Event.Updated，因为 Parcel watcher 会自动检测到文件变化
       contentNew = await Filesystem.readText(filePath)
       diff = trimDiff(
         createTwoFilesPatch(filePath, filePath, normalizeLineEndings(contentOld), normalizeLineEndings(contentNew)),

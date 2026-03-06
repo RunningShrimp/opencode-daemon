@@ -4,6 +4,7 @@ import { createWriteStream } from "fs"
 import { Global } from "../global"
 import z from "zod"
 import { Glob } from "./glob"
+import { WriteBuffer } from "./write-buffer"
 
 export namespace Log {
   export const Level = z.enum(["DEBUG", "INFO", "WARN", "ERROR"]).meta({ ref: "LogLevel", description: "Log level" })
@@ -56,6 +57,7 @@ export namespace Log {
     process.stderr.write(msg)
     return msg.length
   }
+  let buffer: WriteBuffer | null = null
 
   export async function init(options: Options) {
     if (options.level) level = options.level
@@ -66,14 +68,23 @@ export namespace Log {
       options.dev ? "dev.log" : new Date().toISOString().split(".")[0].replace(/:/g, "") + ".log",
     )
     await fs.truncate(logpath).catch(() => {})
+
     const stream = createWriteStream(logpath, { flags: "a" })
+    buffer = new WriteBuffer(
+      {
+        maxSize: 64 * 1024,
+        minFlushSize: 4 * 1024,
+        flushInterval: 500,
+      },
+      (data: Buffer) => {
+        stream.write(data)
+      },
+    )
+
     write = async (msg: any) => {
-      return new Promise((resolve, reject) => {
-        stream.write(msg, (err) => {
-          if (err) reject(err)
-          else resolve(msg.length)
-        })
-      })
+      const data = typeof msg === "string" ? msg : String(msg)
+      buffer?.write(data)
+      return data.length
     }
   }
 
@@ -178,5 +189,11 @@ export namespace Log {
     }
 
     return result
+  }
+
+  export async function flush(): Promise<void> {
+    if (buffer) {
+      await buffer.flush()
+    }
   }
 }
