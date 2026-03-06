@@ -35,6 +35,7 @@ import { JsonMigration } from "./storage/json-migration"
 import { Database } from "./storage/db"
 import { destroyAll, LifecycleEvent } from "./util/lifecycle"
 import { Bus } from "./bus"
+import { initializeSessionErrorHandler } from "./session/error-handler"
 
 process.on("unhandledRejection", (e) => {
   Log.Default.error("rejection", {
@@ -166,6 +167,8 @@ cli = cli
   .strict()
 
 try {
+  // Initialize session error handler for proper error tracking
+  initializeSessionErrorHandler()
   await cli.parse()
 } catch (e) {
   let data: Record<string, any> = {}

@@ -5,9 +5,9 @@
  * Subscribes to Session.Event.Error and logs/handles errors appropriately.
  */
 
-import { Bus } from "./bus"
-import { Session } from "./session"
-import { Log } from "./util/log"
+import { Bus } from "../bus"
+import { Session } from "."
+import { Log } from "../util/log"
 
 const log = Log.create({ service: "session-error-handler" })
 
