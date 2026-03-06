@@ -31,6 +31,8 @@ export class Mutex {
     resolve: () => void
     reject: (error: Error) => void
   }> = []
+  private _forceReleased = false
+  private _forceError: Error | null = null
 
   /**
    * Execute a function with mutex protection.
@@ -40,6 +42,11 @@ export class Mutex {
    * @returns Promise resolving to the function's return value
    */
   async run<T>(fn: () => Promise<T>): Promise<T> {
+    // Check if force released
+    if (this._forceReleased && this._forceError) {
+      throw this._forceError
+    }
+
     if (!this.locked) {
       this.locked = true
       try {
@@ -53,6 +60,11 @@ export class Mutex {
     return new Promise<T>((resolve, reject) => {
       this.waitQueue.push({ resolve, reject })
     }).then(async () => {
+      // Check if force released while waiting
+      if (this._forceReleased && this._forceError) {
+        throw this._forceError
+      }
+
       this.locked = true
       try {
         return await fn()
@@ -98,9 +110,13 @@ export class Mutex {
 
   /**
    * Force release the mutex, rejecting all waiting operations
+   * and marking the mutex as permanently released
    * @param error - Error to reject waiting operations with
    */
   forceRelease(error: Error): void {
+    this._forceReleased = true
+    this._forceError = error
+
     // Reject all waiting operations
     while (this.waitQueue.length > 0) {
       const waiter = this.waitQueue.shift()
@@ -110,6 +126,23 @@ export class Mutex {
     }
     this.locked = false
     log.warn("Mutex force released", { waiters: this.waitQueue.length })
+  }
+
+  /**
+   * Check if mutex was force released
+   */
+  isForceReleased(): boolean {
+    return this._forceReleased
+  }
+
+  /**
+   * Reset the mutex (for testing purposes)
+   */
+  reset(): void {
+    this.locked = false
+    this.waitQueue = []
+    this._forceReleased = false
+    this._forceError = null
   }
 }
 

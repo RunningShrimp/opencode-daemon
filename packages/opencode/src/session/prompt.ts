@@ -45,7 +45,7 @@ import { LLM } from "./llm"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
-import { getController } from "@/util/dynamic-turn-control"
+import { getController, removeController } from "@/util/dynamic-turn-control"
 import { getImageRouter, processImages } from "./image-router"
 import { Config } from "../config/config"
 
@@ -267,6 +267,8 @@ export namespace SessionPrompt {
     match.abort.abort()
     delete s[sessionID]
     SessionStatus.set(sessionID, { type: "idle" })
+    // Clean up turn controller to prevent memory leak
+    removeController(sessionID)
     return
   }
 

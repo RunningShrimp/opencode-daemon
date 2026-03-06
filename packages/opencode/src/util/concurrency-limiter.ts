@@ -5,13 +5,12 @@
  * number of concurrent operations. Implements a fair queue with FIFO ordering.
  *
  * This implementation is thread-safe and does not have race conditions:
- * - Uses Mutex to protect critical sections
+ * - Uses simple atomic-like counter with event loop scheduling
  * - Uses queueMicrotask to avoid synchronous recursion
  * - Properly handles Promise resolution in drainQueue
  */
 
 import { Log } from "./log"
-import { Mutex, NamedMutex } from "./mutex"
 
 const log = Log.create({ service: "concurrency-limiter" })
 
@@ -31,9 +30,9 @@ interface QueuedOperation<T> {
  * in FIFO order when a slot becomes available.
  *
  * This implementation is thread-safe and handles:
- * - Race conditions via Mutex
+ * - Simple counter-based concurrency control
  * - Proper Promise resolution/rejection in drainQueue
- * - Avoids synchronous recursion via queueMicrotask
+ * - Uses queueMicrotask to avoid synchronous recursion
  *
  * @example
  * ```typescript
@@ -47,10 +46,9 @@ interface QueuedOperation<T> {
  */
 export class ConcurrencyLimiter {
   private waitQueue: QueuedOperation<any>[] = []
-  private activeCount = 0
+  private _activeCount = 0
   private readonly maxConcurrent: number
-  private readonly mutex: Mutex
-  private drained = false
+  private _drained = false
 
   /**
    * Create a new ConcurrencyLimiter
@@ -61,68 +59,78 @@ export class ConcurrencyLimiter {
       throw new Error("maxConcurrent must be greater than 0")
     }
     this.maxConcurrent = maxConcurrent
-    this.mutex = new Mutex()
+  }
+
+  /**
+   * Get active count (internal, for testing)
+   */
+  private get activeCount(): number {
+    return this._activeCount
+  }
+
+  /**
+   * Set active count (internal, for testing)
+   */
+  private set activeCount(value: number) {
+    this._activeCount = value
   }
 
   /**
    * Run a function with concurrency limiting.
    * If the concurrency limit is reached, the function will be queued.
    *
-   * This method is fully thread-safe:
-   * - Mutex protects the check-then-act pattern
+   * This method is thread-safe:
+   * - Uses event loop scheduling to prevent race conditions
    * - Queued operations have their own Promise control
    *
    * @param fn - The function to execute
    * @returns Promise resolving to the function's return value
    */
   async run<T>(fn: () => Promise<T>): Promise<T> {
-    // Use mutex to prevent race conditions
-    return this.mutex.run(async () => {
-      // If limiter is drained, reject immediately
-      if (this.drained) {
-        throw new Error("ConcurrencyLimiter has been drained")
-      }
+    // If limiter is drained, reject immediately
+    if (this._drained) {
+      throw new Error("ConcurrencyLimiter has been drained")
+    }
 
-      // If there's capacity, run immediately
-      if (this.activeCount < this.maxConcurrent) {
-        this.activeCount++
-        try {
-          return await fn()
-        } catch (error) {
-          throw error
-        } finally {
+    // If there's capacity, run immediately
+    if (this._activeCount < this.maxConcurrent) {
+      this._activeCount++
+      try {
+        return await fn()
+      } catch (error) {
+        throw error
+      } finally {
+        this.decrementActiveCount()
+      }
+    }
+
+    // Queue the operation - we have full control over the Promise
+    return new Promise<T>((resolve, reject) => {
+      const operation: QueuedOperation<T> = {
+        fn,
+        resolve: (value: T) => {
           this.decrementActiveCount()
-        }
+          resolve(value)
+        },
+        reject: (error: Error) => {
+          this.decrementActiveCount()
+          reject(error)
+        },
       }
+      this.waitQueue.push(operation)
 
-      // Queue the operation - we have full control over the Promise
-      return new Promise<T>((resolve, reject) => {
-        this.waitQueue.push({
-          fn,
-          resolve: (value: T) => {
-            this.decrementActiveCount()
-            resolve(value)
-          },
-          reject: (error: Error) => {
-            this.decrementActiveCount()
-            reject(error)
-          },
-        })
-
-        log.debug("Operation queued", {
-          queueLength: this.waitQueue.length,
-          activeCount: this.activeCount,
-        })
+      log.debug("Operation queued", {
+        queueLength: this.waitQueue.length,
+        activeCount: this._activeCount,
       })
     })
   }
 
   /**
    * Decrement active count and process queue
-   * Must be called within mutex context
    */
   private decrementActiveCount(): void {
-    this.activeCount--
+    this._activeCount--
     this.processQueue()
   }
 
@@ -132,34 +140,28 @@ export class ConcurrencyLimiter {
    */
   private processQueue(): void {
     // Check if we can process more
-    if (this.waitQueue.length === 0 || this.activeCount >= this.maxConcurrent) {
+    if (this.waitQueue.length === 0 || this._activeCount >= this.maxConcurrent) {
       return
     }
 
     // Use queueMicrotask to defer processing and avoid stack overflow
     // from synchronous recursion when tasks complete quickly
     queueMicrotask(() => {
-      this.mutex.run(async () => {
-        // Double-check after acquiring mutex (another process might have handled this)
-        if (this.waitQueue.length === 0 || this.activeCount >= this.maxConcurrent) {
-          return
-        }
+      // Double-check after microtask (another process might have handled this)
+      if (this.waitQueue.length === 0 || this._activeCount >= this.maxConcurrent) {
+        return
+      }
 
-        const next = this.waitQueue.shift()
-        if (!next) {
-          return
-        }
+      const next = this.waitQueue.shift()
+      if (!next) {
+        return
+      }
 
-        this.activeCount++
-        try {
-          const result = await next.fn()
-          next.resolve(result)
-        } catch (error) {
-          next.reject(error as Error)
-        } finally {
-          this.decrementActiveCount()
-        }
-      })
+      this._activeCount++
+      // Execute the queued function
+      next.fn()
+        .then(next.resolve)
+        .catch(next.reject)
     })
   }
 
@@ -167,7 +169,7 @@ export class ConcurrencyLimiter {
    * Get the number of currently active operations
    */
   getActiveCount(): number {
-    return this.activeCount
+    return this._activeCount
   }
 
   /**
@@ -181,7 +183,7 @@ export class ConcurrencyLimiter {
    * Check if there are any pending operations
    */
   hasPendingOperations(): boolean {
-    return this.activeCount > 0 || this.waitQueue.length > 0
+    return this._activeCount > 0 || this.waitQueue.length > 0
   }
 
   /**
@@ -208,13 +210,13 @@ export class ConcurrencyLimiter {
    */
   drainQueue(error: Error): number {
     // Mark as drained to prevent new operations
-    this.drained = true
+    this._drained = true
 
     const queueLength = this.waitQueue.length
     log.info("Draining queue", {
       queueLength,
       error: error.message,
-      activeCount: this.activeCount,
+      activeCount: this._activeCount,
     })
 
     // Reject all queued operations
@@ -236,10 +238,10 @@ export class ConcurrencyLimiter {
    * Currently running operations will continue
    */
   pause(): void {
-    this.drained = true
+    this._drained = true
     log.info("Limiter paused", {
       queueLength: this.waitQueue.length,
-      activeCount: this.activeCount,
+      activeCount: this._activeCount,
     })
   }
 
@@ -247,7 +249,7 @@ export class ConcurrencyLimiter {
    * Resume the limiter - queued operations will start executing again
    */
   resume(): void {
-    this.drained = false
+    this._drained = false
     log.info("Limiter resumed", {
       queueLength: this.waitQueue.length,
     })
@@ -272,10 +274,10 @@ export class ConcurrencyLimiter {
     isPaused: boolean
   } {
     return {
-      activeCount: this.activeCount,
+      activeCount: this._activeCount,
       queueLength: this.waitQueue.length,
       maxConcurrent: this.maxConcurrent,
-      isPaused: this.drained,
+      isPaused: this._drained,
     }
   }
 }
