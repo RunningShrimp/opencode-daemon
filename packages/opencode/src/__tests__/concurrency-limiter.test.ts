@@ -6,6 +6,8 @@
  * - Queue ordering
  * - Error handling
  * - State queries
+ * - Race condition tests
+ * - Drain queue tests
  */
 
 import { describe, test, expect, beforeEach } from "bun:test"
@@ -24,6 +26,10 @@ describe("ConcurrencyLimiter", () => {
 
     test("throws error for negative max concurrent", () => {
       expect(() => new ConcurrencyLimiter(-1)).toThrow()
+    })
+
+    test("throws error for non-numeric max concurrent", () => {
+      expect(() => new ConcurrencyLimiter(NaN)).toThrow()
     })
   })
 
@@ -207,6 +213,23 @@ describe("ConcurrencyLimiter", () => {
       await task
       expect(limiter.hasPendingOperations()).toBe(false)
     })
+
+    test("getMaxConcurrent returns correct value", () => {
+      const limiter = new ConcurrencyLimiter(7)
+      expect(limiter.getMaxConcurrent()).toBe(7)
+    })
+
+    test("getStatus returns complete status", () => {
+      const limiter = new ConcurrencyLimiter(5)
+      const status = limiter.getStatus()
+
+      expect(status).toEqual({
+        activeCount: 0,
+        queueLength: 0,
+        maxConcurrent: 5,
+        isPaused: false,
+      })
+    })
   })
 
   describe("concurrent access", () => {
@@ -231,6 +254,231 @@ describe("ConcurrencyLimiter", () => {
       expect(results.length).toBe(100)
       expect(maxActive.value).toBe(10) // Should not exceed limit
     })
+
+    test("handles rapid concurrent submissions", async () => {
+      const limiter = new ConcurrencyLimiter(2)
+      let activeCount = 0
+      const maxActive = { value: 0 }
+
+      // Submit 50 operations as fast as possible
+      const promises = Array(50)
+        .fill(0)
+        .map(() =>
+          limiter.run(async () => {
+            activeCount++
+            maxActive.value = Math.max(maxActive.value, activeCount)
+            await new Promise((resolve) => setTimeout(resolve, 1))
+            activeCount--
+            return "done"
+          }),
+        )
+
+      await Promise.all(promises)
+      expect(maxActive.value).toBe(2)
+    })
+  })
+
+  describe("race condition stress tests", () => {
+    test("handles 1000 concurrent operations without exceeding limit", async () => {
+      const limiter = new ConcurrencyLimiter(20)
+      let activeCount = 0
+      const maxActive = { value: 0 }
+
+      const tasks = Array(1000)
+        .fill(0)
+        .map(() =>
+          limiter.run(async () => {
+            activeCount++
+            maxActive.value = Math.max(maxActive.value, activeCount)
+            await new Promise((resolve) => setTimeout(resolve, Math.random() * 5))
+            activeCount--
+            return "done"
+          }),
+        )
+
+      const results = await Promise.all(tasks)
+      expect(results.length).toBe(1000)
+      expect(maxActive.value).toBe(20)
+    })
+
+    test("no race condition with simultaneous submissions", async () => {
+      const limiter = new ConcurrencyLimiter(3)
+      let activeCount = 0
+      const maxActive = { value: 0 }
+
+      // All operations start at exactly the same time
+      const promises = Array(50).fill(0).map(() =>
+        Promise.resolve().then(() =>
+          limiter.run(async () => {
+            activeCount++
+            maxActive.value = Math.max(maxActive.value, activeCount)
+            await new Promise((resolve) => setTimeout(resolve, 2))
+            activeCount--
+            return "done"
+          })
+        )
+      )
+
+      await Promise.all(promises)
+      expect(maxActive.value).toBe(3) // Should never exceed 3
+    })
+  })
+
+  describe("drain queue", () => {
+    test("drainQueue rejects all queued operations", async () => {
+      const limiter = new ConcurrencyLimiter(1)
+
+      // Start one operation
+      const running = limiter.run(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        return "running"
+      })
+
+      // Queue several operations
+      const queued = [
+        limiter.run(async () => "1"),
+        limiter.run(async () => "2"),
+        limiter.run(async () => "3"),
+      ]
+
+      // Give time for operations to be queued
+      await new Promise((resolve) => setTimeout(resolve, 5))
+
+      // Drain the queue
+      const drainError = new Error("Queue drained")
+      const drained = limiter.drainQueue(drainError)
+
+      expect(drained).toBe(3) // 3 operations were queued
+
+      // Queued operations should be rejected
+      const results = await Promise.allSettled(queued)
+      expect(results[0].status).toBe("rejected")
+      expect(results[1].status).toBe("rejected")
+      expect(results[2].status).toBe("rejected")
+
+      // Running operation should complete
+      expect(await running).toBe("running")
+    })
+
+    test("run throws after drainQueue", async () => {
+      const limiter = new ConcurrencyLimiter(5)
+
+      limiter.drainQueue(new Error("Drained"))
+
+      await expect(limiter.run(async () => "test")).rejects.toThrow(
+        "ConcurrencyLimiter has been drained"
+      )
+    })
+
+    test("drainQueue returns correct count", async () => {
+      const limiter = new ConcurrencyLimiter(1)
+
+      // Queue 10 operations (limit is 1)
+      const tasks = Array(10).fill(0).map(() =>
+        limiter.run(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10))
+          return "done"
+        })
+      )
+
+      await new Promise((resolve) => setTimeout(resolve, 5))
+
+      const drained = limiter.drainQueue(new Error("Test"))
+
+      expect(drained).toBe(9) // 1 running + 9 queued = 10 total, but running continues
+
+      await Promise.all(tasks)
+    })
+
+    test("multiple drainQueue calls don't cause issues", async () => {
+      const limiter = new ConcurrencyLimiter(2)
+
+      const tasks = [
+        limiter.run(async () => "1"),
+        limiter.run(async () => "2"),
+        limiter.run(async () => "3"),
+      ]
+
+      await new Promise((resolve) => setTimeout(resolve, 5))
+
+      limiter.drainQueue(new Error("First drain"))
+      const secondDrain = limiter.drainQueue(new Error("Second drain"))
+
+      expect(secondDrain).toBe(0) // Already drained
+
+      await Promise.allSettled(tasks)
+    })
+  })
+
+  describe("pause and resume", () => {
+    test("pause prevents new executions but allows running to complete", async () => {
+      const limiter = new ConcurrencyLimiter(2)
+
+      const running = limiter.run(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20))
+        return "running"
+      })
+
+      await new Promise((resolve) => setTimeout(resolve, 5))
+
+      limiter.pause()
+
+      const queued = limiter.run(async () => "queued")
+
+      // Give time for queue
+      await new Promise((resolve) => setTimeout(resolve, 5))
+
+      expect(limiter.getStatus().isPaused).toBe(true)
+      expect(limiter.getQueueLength()).toBe(1)
+
+      // Resume should process queue
+      limiter.resume()
+
+      expect(await running).toBe("running")
+      expect(await queued).toBe("queued")
+    })
+
+    test("resume processes queued operations", async () => {
+      const limiter = new ConcurrencyLimiter(1)
+
+      limiter.pause()
+
+      const task = limiter.run(async () => "done")
+
+      await new Promise((resolve) => setTimeout(resolve, 5))
+
+      expect(limiter.getQueueLength()).toBe(1)
+
+      limiter.resume()
+
+      expect(await task).toBe("done")
+    })
+  })
+
+  describe("waitForIdle", () => {
+    test("waits for all operations to complete", async () => {
+      const limiter = new ConcurrencyLimiter(2)
+
+      const tasks = Array(5).fill(0).map(() =>
+        limiter.run(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 20))
+          return "done"
+        })
+      )
+
+      await limiter.waitForIdle()
+
+      expect(limiter.hasPendingOperations()).toBe(false)
+      expect(await Promise.all(tasks)).toHaveLength(5)
+    })
+
+    test("returns immediately when idle", async () => {
+      const limiter = new ConcurrencyLimiter(5)
+
+      await limiter.waitForIdle()
+
+      expect(true).toBe(true)
+    })
   })
 })
 
@@ -238,16 +486,25 @@ describe("Global Limiters", () => {
   test("globalLspLimiter exists and has correct limit", () => {
     const { globalLspLimiter } = require("../util/concurrency-limiter")
     expect(globalLspLimiter).toBeInstanceOf(ConcurrencyLimiter)
+    expect(globalLspLimiter.getMaxConcurrent()).toBe(50)
   })
 
   test("globalMcpLimiter exists and has correct limit", () => {
     const { globalMcpLimiter } = require("../util/concurrency-limiter")
     expect(globalMcpLimiter).toBeInstanceOf(ConcurrencyLimiter)
+    expect(globalMcpLimiter.getMaxConcurrent()).toBe(30)
   })
 
   test("globalFileLimiter exists and has correct limit", () => {
     const { globalFileLimiter } = require("../util/concurrency-limiter")
     expect(globalFileLimiter).toBeInstanceOf(ConcurrencyLimiter)
+    expect(globalFileLimiter.getMaxConcurrent()).toBe(100)
+  })
+
+  test("globalSubagentLimiter exists and has correct limit", () => {
+    const { globalSubagentLimiter } = require("../util/concurrency-limiter")
+    expect(globalSubagentLimiter).toBeInstanceOf(ConcurrencyLimiter)
+    expect(globalSubagentLimiter.getMaxConcurrent()).toBe(10)
   })
 })
 
@@ -277,5 +534,66 @@ describe("Helper functions", () => {
     return withFileLimit(async () => "file result").then((result) => {
       expect(result).toBe("file result")
     })
+  })
+
+  test("withSubagentLimit wraps function correctly", () => {
+    const { withSubagentLimit } = require("../util/concurrency-limiter")
+
+    return withSubagentLimit(async () => "subagent result").then((result) => {
+      expect(result).toBe("subagent result")
+    })
+  })
+})
+
+describe("ConcurrencyLimiterManager", () => {
+  test("creates and manages named limiters", async () => {
+    const { ConcurrencyLimiterManager } = require("../util/concurrency-limiter")
+    const manager = new ConcurrencyLimiterManager(5)
+
+    const limiter1 = manager.getLimiter("test1", 3)
+    const limiter2 = manager.getLimiter("test2")
+
+    expect(limiter1.getMaxConcurrent()).toBe(3)
+    expect(limiter2.getMaxConcurrent()).toBe(5)
+  })
+
+  test("runs function through named limiter", async () => {
+    const { ConcurrencyLimiterManager } = require("../util/concurrency-limiter")
+    const manager = new ConcurrencyLimiterManager(2)
+
+    const result = await manager.run("test", async () => "result")
+    expect(result).toBe("result")
+  })
+
+  test("gets status of all limiters", async () => {
+    const { ConcurrencyLimiterManager } = require("../util/concurrency-limiter")
+    const manager = new ConcurrencyLimiterManager(2)
+
+    await manager.run("limiter1", async () => "a")
+    await manager.run("limiter2", async () => "b")
+
+    const status = manager.getAllStatus()
+    expect(Object.keys(status)).toContain("limiter1")
+    expect(Object.keys(status)).toContain("limiter2")
+  })
+
+  test("drains all limiters", async () => {
+    const { ConcurrencyLimiterManager } = require("../util/concurrency-limiter")
+    const manager = new ConcurrencyLimiterManager(1)
+
+    manager.run("limiter1", async () => {
+      await new Promise((r) => setTimeout(r, 100))
+      return "a"
+    })
+
+    manager.run("limiter2", async () => {
+      await new Promise((r) => setTimeout(r, 100))
+      return "b"
+    })
+
+    await new Promise((r) => setTimeout(r, 10))
+
+    const total = manager.drainAll(new Error("drain"))
+    expect(total).toBeGreaterThan(0)
   })
 })
