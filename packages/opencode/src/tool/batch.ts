@@ -1,9 +1,13 @@
 import z from "zod"
 import { Tool } from "./tool"
 import DESCRIPTION from "./batch.txt"
+import { work } from "../util/queue"
 
 const DISALLOWED = new Set(["batch"])
 const FILTERED_FROM_SUGGESTIONS = new Set(["invalid", "patch", ...DISALLOWED])
+
+// 批量工具调用的并发限制
+const BATCH_CONCURRENCY_LIMIT = 5
 
 export const BatchTool = Tool.define("batch", async () => {
   return {
@@ -129,7 +133,17 @@ export const BatchTool = Tool.define("batch", async () => {
         }
       }
 
-      const results = await Promise.all(toolCalls.map((call) => executeCall(call)))
+      // 使用有限并发限制执行批量工具调用
+      const resultsMap = new Map<number, Awaited<ReturnType<typeof executeCall>>>()
+      
+      await work(BATCH_CONCURRENCY_LIMIT, toolCalls, async (call) => {
+        const index = toolCalls.indexOf(call)
+        const result = await executeCall(call)
+        resultsMap.set(index, result)
+      })
+      
+      // 按原始顺序收集结果
+      const results = toolCalls.map((_, i) => resultsMap.get(i)!)
 
       // Add discarded calls as errors
       const now = Date.now()

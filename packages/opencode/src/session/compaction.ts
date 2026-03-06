@@ -14,6 +14,7 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
+import { getPredictor } from "@/util/compaction-predictor"
 
 export namespace SessionCompaction {
   const log = Log.create({ service: "session.compaction" })
@@ -29,7 +30,11 @@ export namespace SessionCompaction {
 
   const COMPACTION_BUFFER = 20_000
 
-  export async function isOverflow(input: { tokens: MessageV2.Assistant["tokens"]; model: Provider.Model }) {
+  export async function isOverflow(input: {
+    tokens: MessageV2.Assistant["tokens"]
+    model: Provider.Model
+    sessionID?: string
+  }) {
     const config = await Config.get()
     if (config.compaction?.auto === false) return false
     const context = input.model.limit.context
@@ -44,6 +49,22 @@ export namespace SessionCompaction {
     const usable = input.model.limit.input
       ? input.model.limit.input - reserved
       : context - ProviderTransform.maxOutputTokens(input.model)
+
+    if (input.sessionID) {
+      const predictor = getPredictor(input.sessionID)
+      predictor.record(input.tokens.input, input.tokens.output, context)
+      const prediction = predictor.predict(input.tokens.input, input.tokens.output, context)
+      if (prediction.shouldPreempt && prediction.confidence >= 0.7) {
+        log.info("preemptive compaction triggered", {
+          sessionID: input.sessionID,
+          confidence: prediction.confidence,
+          reason: prediction.reason,
+          action: prediction.action,
+        })
+        return true
+      }
+    }
+
     return count >= usable
   }
 

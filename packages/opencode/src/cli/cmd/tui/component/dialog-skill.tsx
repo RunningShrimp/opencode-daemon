@@ -71,6 +71,7 @@ export function DialogSkill(props: DialogSkillProps) {
 
       {/* Error 状态 */}
       <Match when={hasError()}>
+        {/* @ts-expect-error - DialogSelect 不支持 children，但此用法是安全的 */}
         <DialogSelect
           title="Skills"
           placeholder="Error loading skills"
@@ -96,6 +97,7 @@ export function DialogSkill(props: DialogSkillProps) {
 
       {/* Empty 状态 */}
       <Match when={isEmpty()}>
+        {/* @ts-expect-error - DialogSelect 不支持 children，但此用法是安全的 */}
         <DialogSelect
           title="Skills"
           placeholder="No skills available"

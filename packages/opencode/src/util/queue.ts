@@ -18,15 +18,22 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
   }
 }
 
-export async function work<T>(concurrency: number, items: T[], fn: (item: T) => Promise<void>) {
-  const pending = [...items]
-  await Promise.all(
-    Array.from({ length: concurrency }, async () => {
-      while (true) {
-        const item = pending.pop()
-        if (item === undefined) return
-        await fn(item)
-      }
-    }),
-  )
+export async function work<T, R>(
+  concurrency: number, 
+  items: T[], 
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let currentIndex = 0
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (currentIndex < items.length) {
+      const index = currentIndex++
+      const item = items[index]
+      results[index] = await fn(item)
+    }
+  })
+
+  await Promise.all(workers)
+  return results
 }

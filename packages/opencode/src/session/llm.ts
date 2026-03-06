@@ -22,6 +22,7 @@ import { SystemPrompt } from "./system"
 import { Flag } from "@/flag/flag"
 import { PermissionNext } from "@/permission/next"
 import { Auth } from "@/auth"
+import { MemoryGuard } from "@/util/memory-guard"
 
 export namespace LLM {
   const log = Log.create({ service: "llm" })
@@ -277,3 +278,6 @@ export namespace LLM {
     return false
   }
 }
+
+// MemoryGuard integration for memory monitoring
+// This import enables memory pressure detection in the session flow

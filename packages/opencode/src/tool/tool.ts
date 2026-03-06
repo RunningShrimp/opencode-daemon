@@ -3,6 +3,7 @@ import type { MessageV2 } from "../session/message-v2"
 import type { Agent } from "../agent/agent"
 import type { PermissionNext } from "../permission/next"
 import { Truncate } from "./truncation"
+import { getToolEffectivenessTracker } from "@/util/effectiveness-tracker"
 
 export namespace Tool {
   interface Metadata {
@@ -66,20 +67,32 @@ export namespace Tool {
               { cause: error },
             )
           }
-          const result = await execute(args, ctx)
-          // skip truncation for tools that handle it themselves
-          if (result.metadata.truncated !== undefined) {
-            return result
-          }
-          const truncated = await Truncate.output(result.output, {}, initCtx?.agent)
-          return {
-            ...result,
-            output: truncated.content,
-            metadata: {
-              ...result.metadata,
-              truncated: truncated.truncated,
-              ...(truncated.truncated && { outputPath: truncated.outputPath }),
-            },
+          const start = Date.now()
+          let success = true
+          let errorMsg: string | undefined
+          try {
+            const result = await execute(args, ctx)
+            if (result.metadata.truncated !== undefined) {
+              return result
+            }
+            const truncated = await Truncate.output(result.output, {}, initCtx?.agent)
+            return {
+              ...result,
+              output: truncated.content,
+              metadata: {
+                ...result.metadata,
+                truncated: truncated.truncated,
+                ...(truncated.truncated && { outputPath: truncated.outputPath }),
+              },
+            }
+          } catch (err) {
+            success = false
+            errorMsg = String(err)
+            throw err
+          } finally {
+            const duration = Date.now() - start
+            const tracker = getToolEffectivenessTracker(ctx.sessionID)
+            tracker.recordExecution(id, ctx.agent, success, duration, errorMsg)
           }
         }
         return toolInfo

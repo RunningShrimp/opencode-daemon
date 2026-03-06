@@ -62,11 +62,10 @@ export namespace Snapshot {
         })
         .quiet()
         .nothrow()
-      // Configure git to not convert line endings on Windows
-      await $`git --git-dir ${git} config core.autocrlf false`.quiet().nothrow()
-      await $`git --git-dir ${git} config core.longpaths true`.quiet().nothrow()
-      await $`git --git-dir ${git} config core.symlinks true`.quiet().nothrow()
-      await $`git --git-dir ${git} config core.fsmonitor false`.quiet().nothrow()
+      // Configure git to not convert line endings on Windows - 合并为单次调用
+      await $`git --git-dir ${git} config core.autocrlf false && git --git-dir ${git} config core.longpaths true && git --git-dir ${git} config core.symlinks true && git --git-dir ${git} config core.fsmonitor false`
+        .quiet()
+        .nothrow()
       log.info("initialized")
     }
     await add(git)

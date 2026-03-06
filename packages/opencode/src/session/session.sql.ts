@@ -49,7 +49,11 @@ export const MessageTable = sqliteTable(
     ...Timestamps,
     data: text({ mode: "json" }).notNull().$type<InfoData>(),
   },
-  (table) => [index("message_session_idx").on(table.session_id)],
+  (table) => [
+    index("message_session_idx").on(table.session_id),
+    // 复合索引：用于按 session_id + time_created 排序查询
+    index("message_session_time_idx").on(table.session_id, table.time_created),
+  ],
 )
 
 export const PartTable = sqliteTable(
@@ -63,7 +67,12 @@ export const PartTable = sqliteTable(
     ...Timestamps,
     data: text({ mode: "json" }).notNull().$type<PartData>(),
   },
-  (table) => [index("part_message_idx").on(table.message_id), index("part_session_idx").on(table.session_id)],
+  (table) => [
+    index("part_message_idx").on(table.message_id),
+    index("part_session_idx").on(table.session_id),
+    // 复合索引：用于按 message_id + id 排序查询
+    index("part_message_id_idx").on(table.message_id, table.id),
+  ],
 )
 
 export const TodoTable = sqliteTable(

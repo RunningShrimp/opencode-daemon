@@ -45,10 +45,7 @@ export const WriteTool = Tool.define("write", {
     await Bus.publish(File.Event.Edited, {
       file: filepath,
     })
-    await Bus.publish(FileWatcher.Event.Updated, {
-      file: filepath,
-      event: exists ? "change" : "add",
-    })
+    // 不再发布 FileWatcher.Event.Updated，因为 Parcel watcher 会自动检测到文件变化
     FileTime.read(ctx.sessionID, filepath)
 
     let output = "Wrote file successfully."
