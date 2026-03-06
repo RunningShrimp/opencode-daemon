@@ -485,3 +485,24 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     return result
   },
 })
+
+// Re-export split contexts for modular usage
+export { 
+  ProvidersContext, 
+  ProvidersProvider, 
+  useProviders,
+  SessionContext, 
+  SessionProvider,
+  MessagesContext, 
+  MessagesProvider,
+  SystemStatusContext, 
+  SystemStatusProvider,
+} from "./sync-split"
+
+export type { 
+  ProvidersStore, 
+  SessionStore, 
+  MessagesStore, 
+  SystemStatusStore,
+  SyncStatus 
+} from "./sync-split"

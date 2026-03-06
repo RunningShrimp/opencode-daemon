@@ -3,39 +3,92 @@ import path from "path"
 import { createEffect, createMemo, onMount } from "solid-js"
 import { createSimpleContext } from "./helper"
 import { Glob } from "../../../../util/glob"
+
+// Only statically import the most commonly used built-in themes
+// Custom themes will be loaded dynamically on demand
 import aura from "./theme/aura.json" with { type: "json" }
-import ayu from "./theme/ayu.json" with { type: "json" }
 import catppuccin from "./theme/catppuccin.json" with { type: "json" }
-import catppuccinFrappe from "./theme/catppuccin-frappe.json" with { type: "json" }
-import catppuccinMacchiato from "./theme/catppuccin-macchiato.json" with { type: "json" }
-import cobalt2 from "./theme/cobalt2.json" with { type: "json" }
-import cursor from "./theme/cursor.json" with { type: "json" }
 import dracula from "./theme/dracula.json" with { type: "json" }
-import everforest from "./theme/everforest.json" with { type: "json" }
-import flexoki from "./theme/flexoki.json" with { type: "json" }
 import github from "./theme/github.json" with { type: "json" }
 import gruvbox from "./theme/gruvbox.json" with { type: "json" }
 import kanagawa from "./theme/kanagawa.json" with { type: "json" }
-import material from "./theme/material.json" with { type: "json" }
-import matrix from "./theme/matrix.json" with { type: "json" }
-import mercury from "./theme/mercury.json" with { type: "json" }
 import monokai from "./theme/monokai.json" with { type: "json" }
 import nightowl from "./theme/nightowl.json" with { type: "json" }
 import nord from "./theme/nord.json" with { type: "json" }
-import osakaJade from "./theme/osaka-jade.json" with { type: "json" }
 import onedark from "./theme/one-dark.json" with { type: "json" }
 import opencode from "./theme/opencode.json" with { type: "json" }
-import orng from "./theme/orng.json" with { type: "json" }
-import lucentOrng from "./theme/lucent-orng.json" with { type: "json" }
-import palenight from "./theme/palenight.json" with { type: "json" }
 import rosepine from "./theme/rosepine.json" with { type: "json" }
 import solarized from "./theme/solarized.json" with { type: "json" }
-import synthwave84 from "./theme/synthwave84.json" with { type: "json" }
 import tokyonight from "./theme/tokyonight.json" with { type: "json" }
-import vercel from "./theme/vercel.json" with { type: "json" }
-import vesper from "./theme/vesper.json" with { type: "json" }
-import zenburn from "./theme/zenburn.json" with { type: "json" }
-import carbonfox from "./theme/carbonfox.json" with { type: "json" }
+
+/**
+ * Built-in themes that are statically loaded for fast initial render
+ * These are the most commonly used themes
+ */
+const BUILTIN_THEMES = {
+  aura,
+  catppuccin,
+  dracula,
+  github,
+  gruvbox,
+  kanagawa,
+  monokai,
+  nightowl,
+  nord,
+  "one-dark": onedark,
+  opencode,
+  rosepine,
+  solarized,
+  tokyonight,
+} as const
+
+/**
+ * Theme cache for dynamically loaded custom themes
+ * Prevents re-loading themes that have already been fetched
+ */
+const customThemeCache = new Map<string, TerminalColors>()
+
+/**
+ * Dynamically load a custom theme from file system
+ * Uses caching to avoid repeated file reads
+ */
+async function loadCustomTheme(themePath: string): Promise<TerminalColors | null> {
+  // Check cache first
+  if (customThemeCache.has(themePath)) {
+    return customThemeCache.get(themePath)!
+  }
+
+  try {
+    const content = await Filesystem.readTextFile(themePath)
+    const theme = JSON.parse(content) as TerminalColors
+
+    // Validate theme structure
+    if (!theme.palette || !theme.colors) {
+      console.warn(`Invalid theme structure in: ${themePath}`)
+      return null
+    }
+
+    customThemeCache.set(themePath, theme)
+    return theme
+  } catch (error) {
+    console.warn(`Failed to load custom theme from ${themePath}:`, error)
+    return null
+  }
+}
+
+/**
+ * Get theme by name - checks built-in first, then loads custom dynamically
+ */
+function getThemeByName(name: string): TerminalColors | undefined {
+  // Check built-in themes first (case-insensitive)
+  const lowerName = name.toLowerCase()
+  for (const [key, value] of Object.entries(BUILTIN_THEMES)) {
+    if (key.toLowerCase() === lowerName) {
+      return value
+    }
+  }
+  return undefined
+}
 import { useKV } from "./kv"
 import { useRenderer } from "@opentui/solid"
 import { createStore, produce } from "solid-js/store"
@@ -139,39 +192,9 @@ type ThemeJson = {
 }
 
 export const DEFAULT_THEMES: Record<string, ThemeJson> = {
-  aura,
-  ayu,
-  catppuccin,
-  ["catppuccin-frappe"]: catppuccinFrappe,
-  ["catppuccin-macchiato"]: catppuccinMacchiato,
-  cobalt2,
-  cursor,
-  dracula,
-  everforest,
-  flexoki,
-  github,
-  gruvbox,
-  kanagawa,
-  material,
-  matrix,
-  mercury,
-  monokai,
-  nightowl,
-  nord,
-  ["one-dark"]: onedark,
-  ["osaka-jade"]: osakaJade,
-  opencode,
-  orng,
-  ["lucent-orng"]: lucentOrng,
-  palenight,
-  rosepine,
-  solarized,
-  synthwave84,
-  tokyonight,
-  vesper,
-  vercel,
-  zenburn,
-  carbonfox,
+  // Most commonly used built-in themes (statically loaded for fast initial render)
+  ...BUILTIN_THEMES,
+  // Additional themes can be loaded dynamically via getCustomThemes()
 }
 
 function resolveTheme(theme: ThemeJson, mode: "dark" | "light") {
