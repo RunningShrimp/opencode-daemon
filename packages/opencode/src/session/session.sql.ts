@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, index, primaryKey } from "drizzle-orm/sqlite-core"
+import { sqliteTable, text, integer, real, index, primaryKey } from "drizzle-orm/sqlite-core"
 import { ProjectTable } from "../project/project.sql"
 import type { MessageV2 } from "./message-v2"
 import type { Snapshot } from "@/snapshot"
@@ -47,11 +47,10 @@ export const MessageTable = sqliteTable(
       .notNull()
       .references(() => SessionTable.id, { onDelete: "cascade" }),
     ...Timestamps,
-    data: text({ mode: "json" }).notNull().$type<InfoData>(),
+    data: text({ mode: "json" }).$type<InfoData>(),
   },
   (table) => [
     index("message_session_idx").on(table.session_id),
-    // 复合索引：用于按 session_id + time_created 排序查询
     index("message_session_time_idx").on(table.session_id, table.time_created),
   ],
 )
@@ -70,7 +69,6 @@ export const PartTable = sqliteTable(
   (table) => [
     index("part_message_idx").on(table.message_id),
     index("part_session_idx").on(table.session_id),
-    // 复合索引：用于按 message_id + id 排序查询
     index("part_message_id_idx").on(table.message_id, table.id),
   ],
 )
@@ -100,3 +98,24 @@ export const PermissionTable = sqliteTable("permission", {
   ...Timestamps,
   data: text({ mode: "json" }).notNull().$type<PermissionNext.Ruleset>(),
 })
+
+export const ThoughtNodeTable = sqliteTable(
+  "thought_node",
+  {
+    id: text().primaryKey(),
+    session_id: text()
+      .notNull()
+      .references(() => SessionTable.id, { onDelete: "cascade" }),
+    parent_id: text(),
+    content: text().notNull(),
+    score: real().notNull(),
+    children: text(),
+    depth: integer().notNull(),
+    metadata: text({ mode: "json" }),
+    created_at: integer().notNull(),
+  },
+  (table) => [
+    index("thought_node_session_idx").on(table.session_id),
+    index("thought_node_parent_idx").on(table.parent_id),
+  ],
+)
