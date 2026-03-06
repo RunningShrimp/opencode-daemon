@@ -37,28 +37,15 @@ export namespace LSPClient {
         path: z.string(),
       }),
     ),
-    FileChanged: BusEvent.define(
-      "lsp.client.fileChanged",
-      z.object({
-        path: z.string(),
-      }),
-    ),
   }
 
   export async function create(input: { serverID: string; server: LSPServer.Handle; root: string }) {
     const l = log.clone().tag("serverID", input.serverID)
     l.info("starting client")
 
-    // Validate that stdio streams are available before creating the connection
-    if (!input.server.process.stdout || !input.server.process.stdin) {
-      throw new Error(
-        `LSP server ${input.serverID} process has invalid stdio streams`,
-      )
-    }
-
     const connection = createMessageConnection(
-      new StreamMessageReader(input.server.process.stdout),
-      new StreamMessageWriter(input.server.process.stdin),
+      new StreamMessageReader(input.server.process.stdout as any),
+      new StreamMessageWriter(input.server.process.stdin as any),
     )
 
     const diagnostics = new Map<string, Diagnostic[]>()
@@ -149,41 +136,6 @@ export namespace LSPClient {
       [path: string]: number
     } = {}
 
-    // Track last access time for LRU cleanup
-    const fileAccessTimes = new Map<string, number>()
-    const MAX_OPENED_FILES = 100
-
-    // Cleanup old files when exceeding limit
-    const cleanupOldFiles = async () => {
-      if (Object.keys(files).length <= MAX_OPENED_FILES) return
-
-      // Sort by access time, remove oldest
-      const sorted = Array.from(fileAccessTimes.entries()).sort((a, b) => a[1] - b[1])
-      const toRemove = sorted.slice(0, Math.floor(MAX_OPENED_FILES / 2))
-
-      for (const [filePath] of toRemove) {
-        if (files[filePath] !== undefined) {
-          log.info("closing file due to limit", { path: filePath })
-          await closeFileInternal(filePath)
-        }
-      }
-    }
-
-    // Internal close function
-    const closeFileInternal = async (filePath: string) => {
-      const normalizedPath = Filesystem.normalizePath(filePath)
-      if (files[normalizedPath] === undefined) return
-
-      log.info("textDocument/didClose", { path: normalizedPath })
-      await connection.sendNotification("textDocument/didClose", {
-        textDocument: { uri: pathToFileURL(normalizedPath).href },
-      })
-
-      delete files[normalizedPath]
-      fileAccessTimes.delete(normalizedPath)
-      diagnostics.delete(normalizedPath)
-    }
-
     const result = {
       root: input.root,
       get serverID() {
@@ -195,10 +147,6 @@ export namespace LSPClient {
       notify: {
         async open(input: { path: string }) {
           input.path = path.isAbsolute(input.path) ? input.path : path.resolve(Instance.directory, input.path)
-
-          // Cleanup old files if needed before opening new one
-          await cleanupOldFiles()
-
           const text = await Filesystem.readText(input.path)
           const extension = path.extname(input.path)
           const languageId = LANGUAGE_EXTENSIONS[extension] ?? "plaintext"
@@ -217,7 +165,6 @@ export namespace LSPClient {
 
             const next = version + 1
             files[input.path] = next
-            fileAccessTimes.set(input.path, Date.now())
             log.info("textDocument/didChange", {
               path: input.path,
               version: next,
@@ -229,9 +176,6 @@ export namespace LSPClient {
               },
               contentChanges: [{ text }],
             })
-
-            // Publish file changed event for cache invalidation
-            Bus.publish(Event.FileChanged, { path: input.path })
             return
           }
 
@@ -256,17 +200,7 @@ export namespace LSPClient {
             },
           })
           files[input.path] = 0
-          fileAccessTimes.set(input.path, Date.now())
-
-          // Publish file changed event for cache invalidation
-          Bus.publish(Event.FileChanged, { path: input.path })
           return
-        },
-        async close(input: { path: string }) {
-          const normalizedPath = path.isAbsolute(input.path)
-            ? input.path
-            : path.resolve(Instance.directory, input.path)
-          await closeFileInternal(normalizedPath)
         },
       },
       get diagnostics() {
@@ -301,58 +235,12 @@ export namespace LSPClient {
             unsub?.()
           })
       },
-      /**
-       * Gracefully shutdown the LSP client following the LSP specification.
-       *
-       * According to the Language Server Protocol:
-       * 1. Send shutdown request
-       * 2. Receive shutdown response
-       * 3. Send exit notification
-       * 4. Then close connection and dispose
-       * 5. Finally kill the process if still alive
-       */
       async shutdown() {
-        l.info("shutting down lsp client")
-
-        try {
-          // Step 1-2: Send shutdown request and wait for response
-          await withTimeout(
-            connection.sendRequest("shutdown", {}),
-            5000,
-          ).catch(() => {
-            l.warn("shutdown request failed or timed out")
-          })
-
-          // Step 3: Send exit notification to allow server to clean up gracefully
-          connection.sendNotification("exit", {})
-
-          // Step 4: Wait a short time for graceful exit
-          await new Promise((resolve) => setTimeout(resolve, 500))
-        } catch (e) {
-          l.warn("error during lsp shutdown", { error: String(e) })
-        }
-
-        // Step 5: Force close connection and dispose resources
-        try {
-          connection.end()
-        } catch {
-          // Ignore errors during close
-        }
-
-        try {
-          connection.dispose()
-        } catch {
-          // Ignore errors during dispose
-        }
-
-        // Step 6: Kill the process if still alive
-        try {
-          input.server.process.kill()
-        } catch {
-          // Process may have already exited
-        }
-
-        l.info("lsp client shutdown complete")
+        l.info("shutting down")
+        connection.end()
+        connection.dispose()
+        input.server.process.kill()
+        l.info("shutdown")
       },
     }
 

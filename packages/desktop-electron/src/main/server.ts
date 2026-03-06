@@ -46,36 +46,11 @@ export function spawnLocalServer(hostname: string, port: number, password: strin
   const wait = (async () => {
     const url = `http://${hostname}:${port}`
 
-    /**
-     * 等待服务器就绪
-     * 使用指数退避策略避免无限循环
-     * @param maxRetries 最大重试次数（默认300次 = 30秒）
-     * @param initialDelay 初始延迟（毫秒）
-     * @param maxDelay 最大延迟（毫秒）
-     */
-    const ready = async (
-      maxRetries: number = 300,
-      initialDelay: number = 100,
-      maxDelay: number = 5000,
-    ) => {
-      let retries = 0
-      let currentDelay = initialDelay
-
-      while (retries < maxRetries) {
-        if (await checkHealth(url, password)) {
-          return true
-        }
-
-        // 等待后递增重试次数
-        await new Promise((resolve) => setTimeout(resolve, currentDelay))
-        retries++
-
-        // 指数退避：延迟时间翻倍，但不超过最大值
-        currentDelay = Math.min(currentDelay * 2, maxDelay)
+    const ready = async () => {
+      while (true) {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        if (await checkHealth(url, password)) return
       }
-
-      // 超过最大重试次数
-      throw new Error(`Server health check timeout after ${maxRetries} attempts`)
     }
 
     const terminated = async () => {

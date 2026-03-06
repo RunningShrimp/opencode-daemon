@@ -28,8 +28,3 @@ opencode-dev
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
-
-# Memoir plugin databases
-.opencode/memoir/memory.db
-.opencode/memoir/memory.db-shm
-.opencode/memoir/memory.db-wal

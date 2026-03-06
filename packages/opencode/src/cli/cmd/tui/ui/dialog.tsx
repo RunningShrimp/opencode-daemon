@@ -155,18 +155,12 @@ export function DialogProvider(props: ParentProps) {
           if (!Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT) return
           if (evt.button !== MouseButton.RIGHT) return
 
-          // Mouse events can't be async, so we use a fire-and-forget pattern
-          Selection.copy(renderer, toast).catch(() => {})
+          if (!Selection.copy(renderer, toast)) return
           evt.preventDefault()
           evt.stopPropagation()
         }}
         onMouseUp={
-          !Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT
-            ? undefined
-            : () => {
-                // Mouse events can't be async, so we use a fire-and-forget pattern
-                Selection.copy(renderer, toast).catch(() => {})
-              }
+          !Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT ? () => Selection.copy(renderer, toast) : undefined
         }
       >
         <Show when={value.stack.length}>

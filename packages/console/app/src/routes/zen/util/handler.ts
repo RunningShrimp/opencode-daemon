@@ -73,22 +73,10 @@ export async function handler(
   const MAX_429_RETRIES = 3
   const dict = i18n(localeFromRequest(input.request))
   const t = (key: Key, params?: Record<string, string | number>) => resolve(dict[key], params)
-
-  /**
-   * 获取管理员工作区 ID 列表
-   * 从环境变量 ADMIN_WORKSPACES 读取，多个 ID 用逗号分隔
-   * 如果未设置环境变量，返回空数组
-   * @returns 管理员工作区 ID 数组
-   */
-  function getAdminWorkspaces(): string[] {
-    const envValue = process.env.ADMIN_WORKSPACES
-    if (!envValue) {
-      return []
-    }
-    return envValue.split(",").map((id) => id.trim()).filter((id) => id.length > 0)
-  }
-
-  const ADMIN_WORKSPACES = getAdminWorkspaces()
+  const ADMIN_WORKSPACES = [
+    "wrk_01K46JDFR0E75SG2Q8K172KF3Y", // frank
+    "wrk_01K6W1A3VE0KMNVSCQT43BG2SX", // opencode bench
+  ]
 
   try {
     const url = input.request.url

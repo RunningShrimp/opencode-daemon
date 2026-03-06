@@ -58,14 +58,7 @@ export function createMainWindow(globals: Globals) {
       : {}),
     webPreferences: {
       preload: join(root, "../preload/index.mjs"),
-      // 启用安全沙箱，限制渲染进程对系统资源的访问
-      sandbox: true,
-      // 隔离 preload 脚本与渲染进程的上下文，防止原型链污染
-      contextIsolation: true,
-      // 禁用 Node.js API 在渲染进程中的访问，增强安全性
-      nodeIntegration: false,
-      // 启用 Web 安全特性，防止跨站脚本攻击
-      webSecurity: true,
+      sandbox: false,
     },
   })
 
@@ -99,14 +92,7 @@ export function createLoadingWindow(globals: Globals) {
       : {}),
     webPreferences: {
       preload: join(root, "../preload/index.mjs"),
-      // 启用安全沙箱，限制渲染进程对系统资源的访问
-      sandbox: true,
-      // 隔离 preload 脚本与渲染进程的上下文，防止原型链污染
-      contextIsolation: true,
-      // 禁用 Node.js API 在渲染进程中的访问，增强安全性
-      nodeIntegration: false,
-      // 启用 Web 安全特性，防止跨站脚本攻击
-      webSecurity: true,
+      sandbox: false,
     },
   })
 

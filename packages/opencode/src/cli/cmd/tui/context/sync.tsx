@@ -300,10 +300,29 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "message.part.delta": {
-          const parts = store.part[event.properties.messageID]
-          if (!parts) break
+          let parts = store.part[event.properties.messageID]
+          if (!parts) {
+            setStore("part", event.properties.messageID, [])
+            parts = []
+          }
           const result = Binary.search(parts, event.properties.partID, (p) => p.id)
-          if (!result.found) break
+          if (!result.found) {
+            setStore(
+              "part",
+              event.properties.messageID,
+              produce((draft) => {
+                const placeholder: Part = {
+                  id: event.properties.partID,
+                  messageID: event.properties.messageID,
+                  sessionID: event.properties.sessionID,
+                  type: "text",
+                  text: event.properties.delta,
+                }
+                draft.splice(result.index, 0, placeholder)
+              }),
+            )
+            break
+          }
           setStore(
             "part",
             event.properties.messageID,
@@ -347,6 +366,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     const args = useArgs()
 
     async function bootstrap() {
+      console.log("bootstrapping")
       const start = Date.now() - 30 * 24 * 60 * 60 * 1000
       const sessionListPromise = sdk.client.session
         .list({ start: start })
@@ -485,24 +505,3 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     return result
   },
 })
-
-// Re-export split contexts for modular usage
-export { 
-  ProvidersContext, 
-  ProvidersProvider, 
-  useProviders,
-  SessionContext, 
-  SessionProvider,
-  MessagesContext, 
-  MessagesProvider,
-  SystemStatusContext, 
-  SystemStatusProvider,
-} from "./sync-split"
-
-export type { 
-  ProvidersStore, 
-  SessionStore, 
-  MessagesStore, 
-  SystemStatusStore,
-  SyncStatus 
-} from "./sync-split"

@@ -7,8 +7,8 @@ import {
   For,
   Match,
   on,
-  onMount,
   onCleanup,
+  onMount,
   Show,
   Switch,
   useContext,
@@ -155,7 +155,7 @@ export function Session() {
   const [timestamps, setTimestamps] = kv.signal<"hide" | "show">("timestamps", "hide")
   const [showDetails, setShowDetails] = kv.signal("tool_details_visibility", true)
   const [showAssistantMetadata, setShowAssistantMetadata] = kv.signal("assistant_metadata_visibility", true)
-  const [showScrollbar, setShowScrollbar] = kv.signal("scrollbar_visible", false)
+  const [showScrollbar, setShowScrollbar] = kv.signal("scrollbar_visible", true)
   const [showHeader, setShowHeader] = kv.signal("header_visible", true)
   const [diffWrapMode] = kv.signal<"word" | "none">("diff_wrap_mode", "word")
   const [animationsEnabled, setAnimationsEnabled] = kv.signal("animations_enabled", true)
@@ -183,17 +183,13 @@ export function Session() {
     return new CustomSpeedScroll(3)
   })
 
-  // 使用 AbortController 管理异步操作的生命周期，防止内存泄漏
-  const abortController = new AbortController()
   createEffect(async () => {
     await sync.session
-      .sync(route.sessionID, { signal: abortController.signal })
+      .sync(route.sessionID)
       .then(() => {
         if (scroll) scroll.scrollBy(100_000)
       })
       .catch((e) => {
-        // 忽略 abort 错误
-        if (e instanceof Error && e.name === "AbortError") return
         console.error(e)
         toast.show({
           message: `Session not found: ${route.sessionID}`,
@@ -201,11 +197,6 @@ export function Session() {
         })
         return navigate({ type: "home" })
       })
-  })
-
-  // 组件卸载时取消所有进行中的请求
-  onCleanup(() => {
-    abortController.abort()
   })
 
   const toast = useToast()
@@ -219,33 +210,22 @@ export function Session() {
   })
 
   let lastSwitch: string | undefined = undefined
+  const unsub = sdk.event.on("message.part.updated", (evt) => {
+    const part = evt.properties.part
+    if (part.type !== "tool") return
+    if (part.sessionID !== route.sessionID) return
+    if (part.state.status !== "completed") return
+    if (part.id === lastSwitch) return
 
-  // Handle tool execution completion to switch between plan/build modes
-  // Using onMount/onCleanup to properly manage event listener lifecycle
-  onMount(() => {
-    const handleMessagePartUpdated = (evt: { properties: { part: { type: string; sessionID: string; state: { status: string }; id: string; tool: string } } }) => {
-      const part = evt.properties.part
-      if (part.type !== "tool") return
-      if (part.sessionID !== route.sessionID) return
-      if (part.state.status !== "completed") return
-      if (part.id === lastSwitch) return
-
-      if (part.tool === "plan_exit") {
-        local.agent.set("build")
-        lastSwitch = part.id
-      } else if (part.tool === "plan_enter") {
-        local.agent.set("plan")
-        lastSwitch = part.id
-      }
+    if (part.tool === "plan_exit") {
+      local.agent.set("build")
+      lastSwitch = part.id
+    } else if (part.tool === "plan_enter") {
+      local.agent.set("plan")
+      lastSwitch = part.id
     }
-
-    sdk.event.on("message.part.updated", handleMessagePartUpdated)
-
-    // Cleanup event listener on component unmount to prevent memory leaks
-    onCleanup(() => {
-      sdk.event.off("message.part.updated", handleMessagePartUpdated)
-    })
   })
+  onCleanup(unsub)
 
   let scroll: ScrollBoxRenderable
   let prompt: PromptRef
@@ -1034,24 +1014,23 @@ export function Session() {
   // snap to bottom when session changes
   createEffect(on(() => route.sessionID, toBottom))
 
-  // 使用 useMemo 包装 Context value，避免每次渲染都创建新对象导致子组件不必要地重渲染
-  const contextValue = createMemo(() => ({
-    get width() {
-      return contentWidth()
-    },
-    sessionID: route.sessionID,
-    conceal,
-    showThinking,
-    showTimestamps,
-    showDetails,
-    showGenericToolOutput,
-    diffWrapMode,
-    sync,
-    tui: tuiConfig,
-  }))
-
   return (
-    <context.Provider value={contextValue()}>
+    <context.Provider
+      value={{
+        get width() {
+          return contentWidth()
+        },
+        sessionID: route.sessionID,
+        conceal,
+        showThinking,
+        showTimestamps,
+        showDetails,
+        showGenericToolOutput,
+        diffWrapMode,
+        sync,
+        tui: tuiConfig,
+      }}
+    >
       <box flexDirection="row">
         <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
           <Show when={session()}>
@@ -1648,11 +1627,14 @@ function InlineTool(props: {
   spinner?: boolean
   children: JSX.Element
   part: ToolPart
+  onClick?: () => void
 }) {
   const [margin, setMargin] = createSignal(0)
   const { theme } = useTheme()
   const ctx = use()
   const sync = useSync()
+  const renderer = useRenderer()
+  const [hover, setHover] = createSignal(false)
 
   const permission = createMemo(() => {
     const callID = sync.data.permission[ctx.sessionID]?.at(0)?.tool?.callID
@@ -1662,6 +1644,7 @@ function InlineTool(props: {
 
   const fg = createMemo(() => {
     if (permission()) return theme.warning
+    if (hover() && props.onClick) return theme.text
     if (props.complete) return theme.textMuted
     return theme.text
   })
@@ -1679,6 +1662,12 @@ function InlineTool(props: {
     <box
       marginTop={margin()}
       paddingLeft={3}
+      onMouseOver={() => props.onClick && setHover(true)}
+      onMouseOut={() => setHover(false)}
+      onMouseUp={() => {
+        if (renderer.getSelection()?.getSelectedText()) return
+        props.onClick?.()
+      }}
       renderBefore={function () {
         const el = this as BoxRenderable
         const parent = el.parent
@@ -1901,8 +1890,10 @@ function Read(props: ToolProps<typeof ReadTool>) {
       </InlineTool>
       <For each={loaded()}>
         {(filepath) => (
-          <box paddingLeft={5}>
-            <text fg={theme.textMuted}>⤷ Loaded {normalizePath(filepath)}</text>
+          <box paddingLeft={3}>
+            <text paddingLeft={3} fg={theme.textMuted}>
+              ↳ Loaded {normalizePath(filepath)}
+            </text>
           </box>
         )}
       </For>
@@ -2020,6 +2011,11 @@ function Task(props: ToolProps<typeof TaskTool>) {
       complete={props.input.description}
       pending="Delegating..."
       part={props.part}
+      onClick={() => {
+        if (props.metadata.sessionId) {
+          navigate({ type: "session", sessionID: props.metadata.sessionId })
+        }
+      }}
     >
       {content()}
     </InlineTool>

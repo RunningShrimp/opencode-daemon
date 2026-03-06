@@ -8,10 +8,6 @@ import { pathToFileURL } from "url"
 import { assertExternalDirectory } from "./external-directory"
 import { Filesystem } from "../util/filesystem"
 
-// Debounce map for LSP operations
-const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>()
-const DEBOUNCE_MS = 150
-
 const operations = [
   "goToDefinition",
   "findReferences",
@@ -24,13 +20,6 @@ const operations = [
   "outgoingCalls",
 ] as const
 
-type LspParams = {
-  operation: typeof operations[number]
-  filePath: string
-  line: number
-  character: number
-}
-
 export const LspTool = Tool.define("lsp", {
   description: DESCRIPTION,
   parameters: z.object({
@@ -39,7 +28,7 @@ export const LspTool = Tool.define("lsp", {
     line: z.number().int().min(1).describe("The line number (1-based, as shown in editors)"),
     character: z.number().int().min(1).describe("The character offset (1-based, as shown in editors)"),
   }),
-  execute: async (args: LspParams, ctx): Promise<{ title: string; metadata: { result: unknown[] }; output: string }> => {
+  execute: async (args, ctx) => {
     const file = path.isAbsolute(args.filePath) ? args.filePath : path.join(Instance.directory, args.filePath)
     await assertExternalDirectory(ctx, file)
 
@@ -69,76 +58,40 @@ export const LspTool = Tool.define("lsp", {
       throw new Error("No LSP server available for this file type.")
     }
 
-    // Debounce: cancel previous requests with same key
-    const debounceKey = `${file}:${args.line}:${args.character}`
-    const existingTimer = debounceTimers.get(debounceKey)
-    if (existingTimer) {
-      clearTimeout(existingTimer)
-    }
+    await LSP.touchFile(file, true)
 
-    // Touch file without waiting for diagnostics
-    await LSP.touchFile(file, false)
+    const result: unknown[] = await (async () => {
+      switch (args.operation) {
+        case "goToDefinition":
+          return LSP.definition(position)
+        case "findReferences":
+          return LSP.references(position)
+        case "hover":
+          return LSP.hover(position)
+        case "documentSymbol":
+          return LSP.documentSymbol(uri)
+        case "workspaceSymbol":
+          return LSP.workspaceSymbol("")
+        case "goToImplementation":
+          return LSP.implementation(position)
+        case "prepareCallHierarchy":
+          return LSP.prepareCallHierarchy(position)
+        case "incomingCalls":
+          return LSP.incomingCalls(position)
+        case "outgoingCalls":
+          return LSP.outgoingCalls(position)
+      }
+    })()
 
-    // For operations that support debounce (hover, definition, references)
-    if (["hover", "goToDefinition", "findReferences"].includes(args.operation)) {
-      return new Promise((resolve, reject) => {
-        const timer = setTimeout(async () => {
-          debounceTimers.delete(debounceKey)
-          try {
-            const result = await runLspOperation(args.operation, uri, position) as unknown[]
-            resolve({
-              title,
-              metadata: { result },
-              output: result.length === 0
-                ? `No results found for ${args.operation}`
-                : JSON.stringify(result, null, 2),
-            })
-          } catch (err) {
-            reject(err)
-          }
-        }, DEBOUNCE_MS)
+    const output = (() => {
+      if (result.length === 0) return `No results found for ${args.operation}`
+      return JSON.stringify(result, null, 2)
+    })()
 
-        debounceTimers.set(debounceKey, timer)
-      })
-    }
-
-    // For non-debounced operations, execute immediately
-    const result = await runLspOperation(args.operation, uri, position) as unknown[]
     return {
       title,
       metadata: { result },
-      output: result.length === 0
-        ? `No results found for ${args.operation}`
-        : JSON.stringify(result, null, 2),
+      output,
     }
   },
 })
-
-async function runLspOperation(
-  operation: typeof operations[number],
-  uri: string,
-  position: { file: string; line: number; character: number },
-): Promise<unknown> {
-  switch (operation) {
-    case "goToDefinition":
-      return LSP.definition(position)
-    case "findReferences":
-      return LSP.references(position)
-    case "hover":
-      return LSP.hover(position)
-    case "documentSymbol":
-      return LSP.documentSymbol(uri)
-    case "workspaceSymbol":
-      return LSP.workspaceSymbol("")
-    case "goToImplementation":
-      return LSP.implementation(position)
-    case "prepareCallHierarchy":
-      return LSP.prepareCallHierarchy(position)
-    case "incomingCalls":
-      return LSP.incomingCalls(position)
-    case "outgoingCalls":
-      return await LSP.outgoingCalls(position) as unknown[]
-    default:
-      return []
-  }
-}

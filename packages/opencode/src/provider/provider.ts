@@ -6,9 +6,10 @@ import { mapValues, mergeDeep, omit, pickBy, sortBy } from "remeda"
 import { NoSuchModelError, type Provider as SDK } from "ai"
 import { Log } from "../util/log"
 import { BunProc } from "../bun"
+import { Hash } from "../util/hash"
 import { Plugin } from "../plugin"
-import { ModelsDev } from "./models"
 import { NamedError } from "@opencode-ai/util/error"
+import { ModelsDev } from "./models"
 import { Auth } from "../auth"
 import { Env } from "../env"
 import { Instance } from "../project/instance"
@@ -795,7 +796,7 @@ export namespace Provider {
     const modelLoaders: {
       [providerID: string]: CustomModelLoader
     } = {}
-    const sdk = new Map<number, SDK>()
+    const sdk = new Map<string, SDK>()
 
     log.info("init")
 
@@ -1085,7 +1086,7 @@ export namespace Provider {
           ...model.headers,
         }
 
-      const key = Bun.hash.xxHash32(JSON.stringify({ providerID: model.providerID, npm: model.api.npm, options }))
+      const key = Hash.fast(JSON.stringify({ providerID: model.providerID, npm: model.api.npm, options }))
       const existing = s.sdk.get(key)
       if (existing) return existing
 
@@ -1099,15 +1100,7 @@ export namespace Provider {
         if (options["timeout"] !== undefined && options["timeout"] !== null) {
           const signals: AbortSignal[] = []
           if (opts.signal) signals.push(opts.signal)
-          if (options["timeout"] !== false) {
-            signals.push(AbortSignal.timeout(options["timeout"]))
-          } else {
-            // 警告：完全禁用超时可能导致请求无限期挂起
-            console.warn(
-              `[Provider] WARNING: timeout is disabled for provider "${options["providerID"]}. ` +
-              "This may cause requests to hang indefinitely. Consider setting a reasonable timeout value."
-            )
-          }
+          if (options["timeout"] !== false) signals.push(AbortSignal.timeout(options["timeout"]))
 
           const combined = signals.length > 1 ? AbortSignal.any(signals) : signals[0]
 

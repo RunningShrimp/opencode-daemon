@@ -136,13 +136,47 @@ export function tui(input: {
           <ErrorBoundary
             fallback={(error, reset) => <ErrorComponent error={error} reset={reset} onExit={onExit} mode={mode} />}
           >
-            <CoreProviders args={input.args} onExit={onExit} url={input.url} directory={input.directory} fetch={input.fetch} headers={input.headers} events={input.events} config={input.config}>
-              <UIProviders mode={mode}>
-                <FeatureProviders>
-                  <App />
-                </FeatureProviders>
-              </UIProviders>
-            </CoreProviders>
+            <ArgsProvider {...input.args}>
+              <ExitProvider onExit={onExit}>
+                <KVProvider>
+                  <ToastProvider>
+                    <RouteProvider>
+                      <TuiConfigProvider config={input.config}>
+                        <SDKProvider
+                          url={input.url}
+                          directory={input.directory}
+                          fetch={input.fetch}
+                          headers={input.headers}
+                          events={input.events}
+                        >
+                          <SyncProvider>
+                            <ThemeProvider mode={mode}>
+                              <LocalProvider>
+                                <KeybindProvider>
+                                  <PromptStashProvider>
+                                    <DialogProvider>
+                                      <CommandProvider>
+                                        <FrecencyProvider>
+                                          <PromptHistoryProvider>
+                                            <PromptRefProvider>
+                                              <App />
+                                            </PromptRefProvider>
+                                          </PromptHistoryProvider>
+                                        </FrecencyProvider>
+                                      </CommandProvider>
+                                    </DialogProvider>
+                                  </PromptStashProvider>
+                                </KeybindProvider>
+                              </LocalProvider>
+                            </ThemeProvider>
+                          </SyncProvider>
+                        </SDKProvider>
+                      </TuiConfigProvider>
+                    </RouteProvider>
+                  </ToastProvider>
+                </KVProvider>
+              </ExitProvider>
+            </ArgsProvider>
           </ErrorBoundary>
         )
       },
@@ -166,98 +200,6 @@ export function tui(input: {
   })
 }
 
-/**
- * Core providers that handle fundamental app infrastructure
- * - ArgsProvider: Command-line arguments
- * - ExitProvider: App exit handling
- * - KVProvider: Key-value storage
- * - RouteProvider: Routing
- * - SDKProvider: SDK client connection
- */
-function CoreProviders(props: {
-  args: any
-  onExit: () => void
-  url: string
-  directory?: string
-  fetch?: typeof fetch
-  headers?: RequestInit["headers"]
-  events?: any
-  config: any
-  children: any
-}) {
-  return (
-    <ArgsProvider {...props.args}>
-      <ExitProvider onExit={props.onExit}>
-        <KVProvider>
-          <RouteProvider>
-            <TuiConfigProvider config={props.config}>
-              <SDKProvider
-                url={props.url}
-                directory={props.directory}
-                fetch={props.fetch}
-                headers={props.headers}
-                events={props.events}
-              >
-                <SyncProvider>
-                  {props.children}
-                </SyncProvider>
-              </SDKProvider>
-            </TuiConfigProvider>
-          </RouteProvider>
-        </KVProvider>
-      </ExitProvider>
-    </ArgsProvider>
-  )
-}
-
-/**
- * UI providers that handle presentation layer concerns
- * - ToastProvider: Toast notifications
- * - ThemeProvider: Theme switching
- * - LocalProvider: Local state
- * - KeybindProvider: Keyboard shortcuts
- */
-function UIProviders(props: { mode: "light" | "dark" | "system"; children: any }) {
-  return (
-    <ToastProvider>
-      <ThemeProvider mode={props.mode}>
-        <LocalProvider>
-          <KeybindProvider>
-            {props.children}
-          </KeybindProvider>
-        </LocalProvider>
-      </ThemeProvider>
-    </ToastProvider>
-  )
-}
-
-/**
- * Feature providers that handle application-specific features
- * - PromptStashProvider: Command stashing
- * - DialogProvider: Dialog management
- * - CommandProvider: Command execution
- * - FrecencyProvider: Frequently used commands ranking
- * - PromptHistoryProvider: Command history
- * - PromptRefProvider: Prompt references
- */
-function FeatureProviders(props: { children: any }) {
-  return (
-    <PromptStashProvider>
-      <DialogProvider>
-        <CommandProvider>
-          <FrecencyProvider>
-            <PromptHistoryProvider>
-              <PromptRefProvider>
-                {props.children}
-              </PromptRefProvider>
-            </PromptHistoryProvider>
-          </FrecencyProvider>
-        </CommandProvider>
-      </DialogProvider>
-    </PromptStashProvider>
-  )
-}
-
 function App() {
   const route = useRoute()
   const dimensions = useTerminalDimensions()
@@ -274,7 +216,7 @@ function App() {
   const exit = useExit()
   const promptRef = usePromptRef()
 
-  useKeyboard(async (evt) => {
+  useKeyboard((evt) => {
     if (!Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT) return
     if (!renderer.getSelection()) return
 
@@ -283,8 +225,7 @@ function App() {
     // - Esc dismisses selection
     // - Most other key input dismisses selection and is passed through
     if (evt.ctrl && evt.name === "c") {
-      const copyResult = await Selection.copy(renderer, toast)
-      if (!copyResult) {
+      if (!Selection.copy(renderer, toast)) {
         renderer.clearSelection()
         return
       }
@@ -315,6 +256,10 @@ function App() {
     renderer.clearSelection()
   }
   const [terminalTitleEnabled, setTerminalTitleEnabled] = createSignal(kv.get("terminal_title_enabled", true))
+
+  createEffect(() => {
+    console.log(JSON.stringify(route.data))
+  })
 
   // Update terminal window title based on current route and session
   createEffect(() => {
@@ -798,15 +743,11 @@ function App() {
         if (!Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT) return
         if (evt.button !== MouseButton.RIGHT) return
 
-        // Mouse events can't be async, so we use a fire-and-forget pattern
-        Selection.copy(renderer, toast).catch(() => {})
+        if (!Selection.copy(renderer, toast)) return
         evt.preventDefault()
         evt.stopPropagation()
       }}
-      onMouseUp={Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT ? undefined : () => {
-        // Mouse events can't be async, so we use a fire-and-forget pattern
-        Selection.copy(renderer, toast).catch(() => {})
-      }}
+      onMouseUp={Flag.OPENCODE_EXPERIMENTAL_DISABLE_COPY_ON_SELECT ? undefined : () => Selection.copy(renderer, toast)}
     >
       <Switch>
         <Match when={route.data.type === "home"}>
@@ -820,10 +761,6 @@ function App() {
   )
 }
 
-/**
- * Enhanced Error Boundary with retry protection and logging
- * Prevents infinite retry loops by tracking error count
- */
 function ErrorComponent(props: {
   error: Error
   reset: () => void
@@ -833,33 +770,11 @@ function ErrorComponent(props: {
   const term = useTerminalDimensions()
   const renderer = useRenderer()
 
-  // Track error count to prevent infinite retry loops
-  const [errorCount, setErrorCount] = createSignal(0)
-  const MAX_RETRIES = 3
-
-  // Log error for debugging
-  console.error("ErrorBoundary caught error:", props.error.message, props.error.stack)
-
   const handleExit = async () => {
     renderer.setTerminalTitle("")
     renderer.destroy()
     win32FlushInputBuffer()
     await props.onExit()
-  }
-
-  // Enhanced reset with retry protection
-  const handleReset = () => {
-    const count = errorCount() + 1
-    setErrorCount(count)
-
-    if (count > MAX_RETRIES) {
-      console.error(`ErrorBoundary: exceeded max retries (${MAX_RETRIES}), forcing exit`)
-      handleExit()
-      return
-    }
-
-    console.log(`ErrorBoundary: retry attempt ${count}/${MAX_RETRIES}`)
-    props.reset()
   }
 
   useKeyboard((evt) => {
@@ -914,8 +829,7 @@ function ErrorComponent(props: {
       </box>
       <box flexDirection="row" gap={2} alignItems="center">
         <text fg={colors.text}>A fatal error occurred!</text>
-        <text fg={colors.muted}>(Retry {errorCount()}/{MAX_RETRIES})</text>
-        <box onMouseUp={handleReset} backgroundColor={colors.primary} padding={1}>
+        <box onMouseUp={props.reset} backgroundColor={colors.primary} padding={1}>
           <text fg={colors.bg}>Reset TUI</text>
         </box>
         <box onMouseUp={handleExit} backgroundColor={colors.primary} padding={1}>

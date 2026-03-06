@@ -33,9 +33,6 @@ import path from "path"
 import { Global } from "./global"
 import { JsonMigration } from "./storage/json-migration"
 import { Database } from "./storage/db"
-import { destroyAll, LifecycleEvent } from "./util/lifecycle"
-import { Bus } from "./bus"
-import { initializeSessionErrorHandler } from "./session/error-handler"
 
 process.on("unhandledRejection", (e) => {
   Log.Default.error("rejection", {
@@ -48,6 +45,11 @@ process.on("uncaughtException", (e) => {
     e: e instanceof Error ? e.message : e,
   })
 })
+
+// Ensure the process exits on terminal hangup (eg. closing the terminal tab).
+// Without this, long-running commands like `serve` block on a never-resolving
+// promise and survive as orphaned processes.
+process.on("SIGHUP", () => process.exit())
 
 let cli = yargs(hideBin(process.argv))
   .parserConfiguration({ "populate--": true })
@@ -167,8 +169,6 @@ cli = cli
   .strict()
 
 try {
-  // Initialize session error handler for proper error tracking
-  initializeSessionErrorHandler()
   await cli.parse()
 } catch (e) {
   let data: Record<string, any> = {}
@@ -208,8 +208,9 @@ try {
   }
   process.exitCode = 1
 } finally {
-  Bus.publish(LifecycleEvent.Shutdown, {})
-  await destroyAll()
-  await Log.flush()
+  // Some subprocesses don't react properly to SIGTERM and similar signals.
+  // Most notably, some docker-container-based MCP servers don't handle such signals unless
+  // run using `docker run --init`.
+  // Explicitly exit to avoid any hanging subprocesses.
   process.exit()
 }

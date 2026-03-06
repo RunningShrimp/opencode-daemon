@@ -434,7 +434,7 @@ export default function Download() {
             <li>
               <Faq question={i18n.t("home.faq.q3")}>
                 {i18n.t("download.faq.a3.beforeLocal")}{" "}
-                <a href={language.route("/docs/providers/#lm-studio")} target="_blank" rel="noopener noreferrer">
+                <a href={language.route("/docs/providers/#lm-studio")} target="_blank">
                   {i18n.t("download.faq.a3.localLink")}
                 </a>{" "}
                 {i18n.t("download.faq.a3.afterLocal.beforeZen")}{" "}
@@ -465,11 +465,11 @@ export default function Download() {
             <li>
               <Faq question={i18n.t("home.faq.q8")}>
                 {i18n.t("home.faq.a8.p1")}{" "}
-                <a href={config.github.repoUrl} target="_blank" rel="noopener noreferrer">
+                <a href={config.github.repoUrl} target="_blank">
                   {i18n.t("nav.github")}
                 </a>{" "}
                 {i18n.t("home.faq.a8.p2")}{" "}
-                <a href={`${config.github.repoUrl}?tab=MIT-1-ov-file#readme`} target="_blank" rel="noopener noreferrer">
+                <a href={`${config.github.repoUrl}?tab=MIT-1-ov-file#readme`} target="_blank">
                   {i18n.t("home.faq.a8.mitLicense")}
                 </a>
                 {i18n.t("home.faq.a8.p3")}

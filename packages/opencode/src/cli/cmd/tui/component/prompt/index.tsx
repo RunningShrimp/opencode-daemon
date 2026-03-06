@@ -96,28 +96,17 @@ export function Prompt(props: PromptProps) {
   const pasteStyleId = syntax().getStyleId("extmark.paste")!
   let promptPartTypeId = 0
 
-  // Handle prompt append events from SDK
-  // Using onMount/onCleanup to properly manage event listener lifecycle
-  onMount(() => {
-    const handlePromptAppend = (evt: { properties: { text: string } }) => {
+  const unsub = sdk.event.on(TuiEvent.PromptAppend.type, (evt) => {
+    if (!input || input.isDestroyed) return
+    input.insertText(evt.properties.text)
+    setTimeout(() => {
       if (!input || input.isDestroyed) return
-      input.insertText(evt.properties.text)
-      // Use setTimeout as workaround for layout refresh timing
-      setTimeout(() => {
-        if (!input || input.isDestroyed) return
-        input.getLayoutNode().markDirty()
-        input.gotoBufferEnd()
-        renderer.requestRender()
-      }, 0)
-    }
-
-    sdk.event.on(TuiEvent.PromptAppend.type, handlePromptAppend)
-
-    // Cleanup event listener on component unmount to prevent memory leaks
-    onCleanup(() => {
-      sdk.event.off(TuiEvent.PromptAppend.type, handlePromptAppend)
-    })
+      input.getLayoutNode().markDirty()
+      input.gotoBufferEnd()
+      renderer.requestRender()
+    }, 0)
   })
+  onCleanup(unsub)
 
   createEffect(() => {
     if (props.disabled) input.cursorColor = theme.backgroundElement

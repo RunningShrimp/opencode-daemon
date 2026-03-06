@@ -226,8 +226,10 @@ export const ApplyPatchTool = Tool.define("apply_patch", {
       }
     }
 
-    // 不再发布 FileWatcher.Event.Updated，因为 Parcel watcher 会自动检测到文件变化
-    // 保留 updates 用于其他逻辑（如 LSP 通知）
+    // Publish file change events
+    for (const update of updates) {
+      await Bus.publish(FileWatcher.Event.Updated, update)
+    }
 
     // Notify LSP of file changes and collect diagnostics
     for (const change of fileChanges) {

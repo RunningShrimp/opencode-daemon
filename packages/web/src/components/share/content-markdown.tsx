@@ -4,16 +4,14 @@ import markedShiki from "marked-shiki"
 import { createOverflow, useShareMessages } from "./common"
 import { CopyButton } from "./copy-button"
 import { createResource, createSignal } from "solid-js"
-import { escapeAttr } from "../../lib/sanitize"
 import style from "./content-markdown.module.css"
 
 const markedWithShiki = marked.use(
   {
     renderer: {
       link({ href, title, text }) {
-        const titleAttr = title ? ` title="${escapeAttr(title)}"` : ""
-        // href 已由 marked 库进行基本转义，这里额外添加安全属性
-        return `<a href="${escapeAttr(href)}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`
+        const titleAttr = title ? ` title="${title}"` : ""
+        return `<a href="${href}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`
       },
     },
   },

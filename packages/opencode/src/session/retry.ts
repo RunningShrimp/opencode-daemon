@@ -17,12 +17,7 @@ export namespace SessionRetry {
       const timeout = setTimeout(
         () => {
           signal.removeEventListener("abort", abortHandler)
-          // 如果信号已被中止，即使超时到期也要拒绝
-          if (signal.aborted) {
-            reject(new DOMException("Aborted", "AbortError"))
-          } else {
-            resolve()
-          }
+          resolve()
         },
         Math.min(ms, RETRY_MAX_DELAY),
       )

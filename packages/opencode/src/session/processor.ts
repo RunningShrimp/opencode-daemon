@@ -16,28 +16,6 @@ import { SessionCompaction } from "./compaction"
 import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
 
-/**
- * Deep equality check for comparing tool inputs.
- * More efficient than JSON.stringify for frequent comparisons.
- */
-function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) return true
-  if (a === null || b === null) return a === b
-  if (typeof a !== typeof b) return false
-  if (typeof a !== "object") return a === b
-
-  if (Array.isArray(a) !== Array.isArray(b)) return false
-  if (Array.isArray(a) && Array.isArray(b)) {
-    if (a.length !== b.length) return false
-    return a.every((val, i) => deepEqual(val, b[i]))
-  }
-
-  const keysA = Object.keys(a as Record<string, unknown>)
-  const keysB = Object.keys(b as Record<string, unknown>)
-  if (keysA.length !== keysB.length) return false
-  return keysA.every((key) => deepEqual((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]))
-}
-
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
   const log = Log.create({ service: "session.processor" })
@@ -55,7 +33,6 @@ export namespace SessionProcessor {
     let snapshot: string | undefined
     let blocked = false
     let attempt = 0
-    const MAX_RETRY_ATTEMPTS = 5  // 最大重试次数，防止无限循环
     let needsCompaction = false
 
     const result = {
@@ -69,11 +46,6 @@ export namespace SessionProcessor {
         log.info("process")
         needsCompaction = false
         const shouldBreak = (await Config.get()).experimental?.continue_loop_on_deny !== true
-        // 节流配置：限制 delta 事件发布频率
-        const DELTA_THROTTLE_MS = 100  // 100ms 节流
-        let lastDeltaPublishTime = 0
-        let pendingDeltas: Array<{ sessionID: string; messageID: string; partID: string; field: string; delta: string }> = []
-
         while (true) {
           try {
             let currentText: MessageV2.TextPart | undefined
@@ -111,35 +83,18 @@ export namespace SessionProcessor {
                     const part = reasoningMap[value.id]
                     part.text += value.text
                     if (value.providerMetadata) part.metadata = value.providerMetadata
-                    // reasoning delta 也使用相同的节流机制
-                    const now = Date.now()
-                    pendingDeltas.push({
+                    await Session.updatePartDelta({
                       sessionID: part.sessionID,
                       messageID: part.messageID,
                       partID: part.id,
                       field: "text",
                       delta: value.text,
                     })
-                    if (now - lastDeltaPublishTime >= DELTA_THROTTLE_MS) {
-                      const deltasToPublish = [...pendingDeltas]
-                      pendingDeltas = []
-                      lastDeltaPublishTime = now
-                      for (const delta of deltasToPublish) {
-                        await Session.updatePartDelta(delta)
-                      }
-                    }
                   }
                   break
 
                 case "reasoning-end":
                   if (value.id in reasoningMap) {
-                    // 发布所有待处理的 delta
-                    if (pendingDeltas.length > 0) {
-                      for (const delta of pendingDeltas) {
-                        await Session.updatePartDelta(delta)
-                      }
-                      pendingDeltas = []
-                    }
                     const part = reasoningMap[value.id]
                     part.text = part.text.trimEnd()
 
@@ -203,7 +158,7 @@ export namespace SessionProcessor {
                           p.type === "tool" &&
                           p.tool === value.toolName &&
                           p.state.status !== "pending" &&
-                          deepEqual(p.state.input, value.input),
+                          JSON.stringify(p.state.input) === JSON.stringify(value.input),
                       )
                     ) {
                       const agent = await Agent.get(input.assistantMessage.agent)
@@ -326,11 +281,7 @@ export namespace SessionProcessor {
                   })
                   if (
                     !input.assistantMessage.summary &&
-                    (await SessionCompaction.isOverflow({
-                      tokens: usage.tokens,
-                      model: input.model,
-                      sessionID: input.sessionID,
-                    }))
+                    (await SessionCompaction.isOverflow({ tokens: usage.tokens, model: input.model }))
                   ) {
                     needsCompaction = true
                   }
@@ -355,36 +306,18 @@ export namespace SessionProcessor {
                   if (currentText) {
                     currentText.text += value.text
                     if (value.providerMetadata) currentText.metadata = value.providerMetadata
-                    // 节流发布 delta 事件，减少前端渲染压力
-                    const now = Date.now()
-                    pendingDeltas.push({
+                    await Session.updatePartDelta({
                       sessionID: currentText.sessionID,
                       messageID: currentText.messageID,
                       partID: currentText.id,
                       field: "text",
                       delta: value.text,
                     })
-                    if (now - lastDeltaPublishTime >= DELTA_THROTTLE_MS) {
-                      // 批量发布所有待处理的 delta
-                      const deltasToPublish = [...pendingDeltas]
-                      pendingDeltas = []
-                      lastDeltaPublishTime = now
-                      for (const delta of deltasToPublish) {
-                        await Session.updatePartDelta(delta)
-                      }
-                    }
                   }
                   break
 
                 case "text-end":
                   if (currentText) {
-                    // 发布所有待处理的 delta
-                    if (pendingDeltas.length > 0) {
-                      for (const delta of pendingDeltas) {
-                        await Session.updatePartDelta(delta)
-                      }
-                      pendingDeltas = []
-                    }
                     currentText.text = currentText.text.trimEnd()
                     const textOutput = await Plugin.trigger(
                       "experimental.text.complete",
@@ -407,13 +340,6 @@ export namespace SessionProcessor {
                   break
 
                 case "finish":
-                  // 发布所有待处理的 delta
-                  if (pendingDeltas.length > 0) {
-                    for (const delta of pendingDeltas) {
-                      await Session.updatePartDelta(delta)
-                    }
-                    pendingDeltas = []
-                  }
                   break
 
                 default:
@@ -440,28 +366,6 @@ export namespace SessionProcessor {
               const retry = SessionRetry.retryable(error)
               if (retry !== undefined) {
                 attempt++
-                // 超过最大重试次数后停止重试
-                if (attempt > MAX_RETRY_ATTEMPTS) {
-                  log.error("max retry attempts reached, giving up", {
-                    sessionID: input.sessionID,
-                    attempt,
-                    maxAttempts: MAX_RETRY_ATTEMPTS,
-                    error: error.name,
-                  })
-                  input.assistantMessage.error = error
-                  // 创建新的错误对象
-                  const errorMessage = `重试次数超限 (${MAX_RETRY_ATTEMPTS}次): ${(error.data as { message?: string })?.message || retry}`
-                  const newError = {
-                    name: "UnknownError" as const,
-                    data: { message: errorMessage },
-                  }
-                  Bus.publish(Session.Event.Error, {
-                    sessionID: input.assistantMessage.sessionID,
-                    error: newError,
-                  })
-                  SessionStatus.set(input.sessionID, { type: "idle" })
-                  break
-                }
                 const delay = SessionRetry.delay(attempt, error.name === "APIError" ? error : undefined)
                 SessionStatus.set(input.sessionID, {
                   type: "retry",

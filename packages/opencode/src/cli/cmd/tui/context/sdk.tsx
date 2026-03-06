@@ -29,15 +29,9 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       [key in Event["type"]]: Extract<Event, { type: key }>
     }>()
 
-    // Maximum queue size to prevent memory exhaustion during high-frequency events
-    const MAX_QUEUE_SIZE = 1000
-    // Drop oldest events when queue exceeds threshold
-    const QUEUE_DROP_THRESHOLD = 800
-
     let queue: Event[] = []
     let timer: Timer | undefined
     let last = 0
-    let droppedCount = 0
 
     const flush = () => {
       if (queue.length === 0) return
@@ -45,13 +39,6 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       queue = []
       timer = undefined
       last = Date.now()
-
-      // Report dropped events if any
-      if (droppedCount > 0) {
-        console.warn(`Event queue: dropped ${droppedCount} events due to high frequency`)
-        droppedCount = 0
-      }
-
       // Batch all event emissions so all store updates result in a single render
       batch(() => {
         for (const event of events) {
@@ -61,18 +48,6 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     }
 
     const handleEvent = (event: Event) => {
-      // Backpressure handling: drop oldest events when queue is full
-      if (queue.length >= MAX_QUEUE_SIZE) {
-        droppedCount++
-        return
-      }
-
-      // Start dropping events when approaching threshold
-      if (queue.length >= QUEUE_DROP_THRESHOLD) {
-        droppedCount++
-        queue.shift() // Drop oldest event
-      }
-
       queue.push(event)
       const elapsed = Date.now() - last
 

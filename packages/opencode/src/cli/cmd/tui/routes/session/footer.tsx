@@ -32,26 +32,17 @@ export function Footer() {
       if (connected()) return
       if (!store.welcome) {
         setStore("welcome", true)
-        const timeout = setTimeout(() => tick(), 5000)
-        // @ts-expect-error - unref is a valid method on NodeJS.Timeout in Bun
-        timeout.unref?.()
-        timeouts.push(timeout)
+        timeouts.push(setTimeout(() => tick(), 5000))
         return
       }
 
       if (store.welcome) {
         setStore("welcome", false)
-        const timeout = setTimeout(() => tick(), 10_000)
-        // @ts-expect-error - unref is a valid method on NodeJS.Timeout in Bun
-        timeout.unref?.()
-        timeouts.push(timeout)
+        timeouts.push(setTimeout(() => tick(), 10_000))
         return
       }
     }
-    const initialTimeout = setTimeout(() => tick(), 10_000)
-    // @ts-expect-error - unref is a valid method on NodeJS.Timeout in Bun
-    initialTimeout.unref?.()
-    timeouts.push(initialTimeout)
+    timeouts.push(setTimeout(() => tick(), 10_000))
 
     onCleanup(() => {
       timeouts.forEach(clearTimeout)

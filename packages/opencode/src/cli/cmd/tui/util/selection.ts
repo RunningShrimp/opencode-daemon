@@ -11,26 +11,15 @@ type Renderer = {
 }
 
 export namespace Selection {
-  /**
-   * Copy selected text to clipboard
-   * Properly handles the async copy operation to avoid race conditions
-   * - Clears selection only after successful copy
-   * - Preserves selection if copy fails
-   */
-  export async function copy(renderer: Renderer, toast: Toast): Promise<boolean> {
+  export function copy(renderer: Renderer, toast: Toast): boolean {
     const text = renderer.getSelection()?.getSelectedText()
     if (!text) return false
 
-    try {
-      await Clipboard.copy(text)
-      // Clear selection only after successful copy
-      renderer.clearSelection()
-      toast.show({ message: "Copied to clipboard", variant: "info" })
-      return true
-    } catch (error) {
-      // Preserve selection on failure so user can try again
-      toast.error(error)
-      return false
-    }
+    Clipboard.copy(text)
+      .then(() => toast.show({ message: "Copied to clipboard", variant: "info" }))
+      .catch(toast.error)
+
+    renderer.clearSelection()
+    return true
   }
 }

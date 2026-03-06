@@ -1166,45 +1166,6 @@ export namespace Config {
             .positive()
             .optional()
             .describe("Timeout in milliseconds for model context protocol (MCP) requests"),
-          imageUnderstanding: z
-            .object({
-              enabled: z.boolean().default(true).describe("Enable automatic image understanding"),
-              preferMcp: z.boolean().default(true).describe("Prefer MCP tools over multimodal models"),
-              budget: z
-                .enum(["low", "medium", "high"])
-                .default("medium")
-                .describe("Cost budget for image understanding"),
-              maxImageSize: z
-                .number()
-                .int()
-                .positive()
-                .default(10 * 1024 * 1024)
-                .describe("Maximum image size in bytes (default: 10MB)"),
-              mcpTimeout: z
-                .number()
-                .int()
-                .positive()
-                .default(30000)
-                .describe("Timeout for MCP image understanding in milliseconds"),
-              modelTimeout: z
-                .number()
-                .int()
-                .positive()
-                .default(60000)
-                .describe("Timeout for multimodal model image understanding in milliseconds"),
-              modelCacheEnabled: z
-                .boolean()
-                .default(true)
-                .describe("Enable models.dev cache for runtime model capability updates"),
-              modelCacheTTL: z
-                .number()
-                .int()
-                .positive()
-                .default(24 * 60 * 60 * 1000)
-                .describe("Cache TTL in milliseconds (default: 24 hours)"),
-            })
-            .optional()
-            .describe("Configuration for automatic image understanding"),
         })
         .optional(),
     })
@@ -1279,7 +1240,7 @@ export namespace Config {
       if (!parsed.data.$schema && isFile) {
         parsed.data.$schema = "https://opencode.ai/config.json"
         const updated = original.replace(/^\s*\{/, '{\n  "$schema": "https://opencode.ai/config.json",')
-        await Bun.write(options.path, updated).catch(() => {})
+        await Filesystem.write(options.path, updated).catch(() => {})
       }
       const data = parsed.data
       if (data.plugin && isFile) {
@@ -1440,3 +1401,5 @@ export namespace Config {
     return state().then((x) => x.directories)
   }
 }
+Filesystem.write
+Filesystem.write

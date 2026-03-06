@@ -28,6 +28,7 @@ import { Bus } from "../../bus"
 import { MessageV2 } from "../../session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { $ } from "bun"
+import { setTimeout as sleep } from "node:timers/promises"
 
 type GitHubAuthor = {
   login: string
@@ -353,7 +354,7 @@ export const GithubInstallCommand = cmd({
               }
 
               retries++
-              await Bun.sleep(1000)
+              await sleep(1000)
             } while (true)
 
             s.stop("Installed GitHub app")
@@ -1154,24 +1155,19 @@ Co-authored-by: ${actor} <${actor}@users.noreply.github.com>"`
 
       async function branchIsDirty(originalHead: string, expectedBranch: string) {
         console.log("Checking if branch is dirty...")
-        // 使用 git status 获取分支和状态信息，避免多次调用
-        const [branchResult, statusResult] = await Promise.all([
-          $`git rev-parse --abbrev-ref HEAD`,
-          $`git status --porcelain`,
-        ])
-
-        const current = branchResult.stdout.toString().trim()
+        // Detect if the agent switched branches during chat (e.g. created
+        // its own branch, committed, and possibly pushed/created a PR).
+        const current = (await $`git rev-parse --abbrev-ref HEAD`).stdout.toString().trim()
         if (current !== expectedBranch) {
           console.log(`Branch changed during chat: expected ${expectedBranch}, now on ${current}`)
           return { dirty: true, uncommittedChanges: false, switched: true }
         }
 
-        const status = statusResult.stdout.toString().trim()
+        const ret = await $`git status --porcelain`
+        const status = ret.stdout.toString().trim()
         if (status.length > 0) {
           return { dirty: true, uncommittedChanges: true, switched: false }
         }
-
-        // 只有在没有未提交更改时才需要检查 HEAD 是否变化
         const head = (await $`git rev-parse HEAD`).stdout.toString().trim()
         return {
           dirty: head !== originalHead,
@@ -1377,7 +1373,7 @@ Co-authored-by: ${actor} <${actor}@users.noreply.github.com>"`
         } catch (e) {
           if (retries > 0) {
             console.log(`Retrying after ${delayMs}ms...`)
-            await Bun.sleep(delayMs)
+            await sleep(delayMs)
             return withRetry(fn, retries - 1, delayMs)
           }
           throw e

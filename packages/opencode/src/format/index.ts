@@ -9,52 +9,9 @@ import { Config } from "../config/config"
 import { mergeDeep } from "remeda"
 import { Instance } from "../project/instance"
 import { Process } from "../util/process"
-import { throttle } from "../util/throttle"
 
 export namespace Format {
   const log = Log.create({ service: "format" })
-
-  // 格式化节流配置 - 每个文件500ms内不重复格式化
-  const formatThrottle = new Map<string, ReturnType<typeof setTimeout>>()
-
-  // 格式化函数
-  const formatFile = async (file: string) => {
-    log.info("formatting", { file })
-    const ext = path.extname(file)
-
-    for (const item of await getFormatter(ext)) {
-      log.info("running", { command: item.command })
-      try {
-        const proc = Process.spawn(
-          item.command.map((x) => x.replace("$FILE", file)),
-          {
-            cwd: Instance.directory,
-            env: { ...process.env, ...item.environment },
-            stdout: "ignore",
-            stderr: "ignore",
-          },
-        )
-        const exit = await proc.exited
-        if (exit !== 0)
-          log.error("failed", {
-            command: item.command,
-            ...item.environment,
-          })
-      } catch (error) {
-        log.error("failed to format file", {
-          error,
-          command: item.command,
-          ...item.environment,
-          file,
-        })
-      }
-    }
-  }
-
-  // 带节流的格式化处理
-  const throttledFormat = throttle((file: string) => {
-    formatFile(file)
-  }, 500)
 
   export const Status = z
     .object({
@@ -146,10 +103,38 @@ export namespace Format {
 
   export function init() {
     log.info("init")
-    // 使用 throttle 节流，每个文件 500ms 内不重复格式化
-    Bus.subscribe(File.Event.Edited, (payload) => {
+    Bus.subscribe(File.Event.Edited, async (payload) => {
       const file = payload.properties.file
-      throttledFormat(file)
+      log.info("formatting", { file })
+      const ext = path.extname(file)
+
+      for (const item of await getFormatter(ext)) {
+        log.info("running", { command: item.command })
+        try {
+          const proc = Process.spawn(
+            item.command.map((x) => x.replace("$FILE", file)),
+            {
+              cwd: Instance.directory,
+              env: { ...process.env, ...item.environment },
+              stdout: "ignore",
+              stderr: "ignore",
+            },
+          )
+          const exit = await proc.exited
+          if (exit !== 0)
+            log.error("failed", {
+              command: item.command,
+              ...item.environment,
+            })
+        } catch (error) {
+          log.error("failed to format file", {
+            error,
+            command: item.command,
+            ...item.environment,
+            file,
+          })
+        }
+      }
     })
   }
 }

@@ -6,32 +6,7 @@ import { tmpdir } from "os"
 import path from "path"
 import { Filesystem } from "../../../../util/filesystem"
 import { Process } from "../../../../util/process"
-
-/**
- * Platform detection utilities for clipboard operations
- */
-
-const DEFAULT_TIMEOUT_MS = 10_000 // 10 seconds timeout for clipboard operations
-
-/**
- * Check if running in WSL (Windows Subsystem for Linux)
- * Uses multiple detection methods for reliability
- */
-function isWSL(): boolean {
-  if (platform() !== "win32") return false
-
-  // Check WSL_DISTRO_NAME environment variable (most reliable)
-  if (process.env.WSL_DISTRO_NAME) return true
-
-  // Check /proc/version for WSL indicators
-  try {
-    const version = $`uname -r`.text().toLowerCase()
-    return version.includes("microsoft") || version.includes("wsl")
-  } catch {
-    // Fallback: check release string
-    return release().toLowerCase().includes("wsl")
-  }
-}
+import { which } from "../../../../util/which"
 
 /**
  * Writes text to clipboard via OSC 52 escape sequence.
@@ -58,86 +33,52 @@ export namespace Clipboard {
 
     if (os === "darwin") {
       const tmpfile = path.join(tmpdir(), "opencode-clipboard.png")
-      // Escape single quotes in path for shell safety
-      const escapedTmpfile = tmpfile.replace(/'/g, "'\\''")
       try {
-        // Use timeout to prevent hanging on clipboard issues
-        await withTimeout(
-          $`osascript -e 'set imageData to the clipboard as "PNGf"' -e 'set fileRef to open for access POSIX file '${escapedTmpfile}' with write permission' -e 'set eof fileRef to 0' -e 'write imageData to fileRef' -e 'close access fileRef'`
-            .nothrow()
-            .quiet(),
-          DEFAULT_TIMEOUT_MS,
-        )
+        await $`osascript -e 'set imageData to the clipboard as "PNGf"' -e 'set fileRef to open for access POSIX file "${tmpfile}" with write permission' -e 'set eof fileRef to 0' -e 'write imageData to fileRef' -e 'close access fileRef'`
+          .nothrow()
+          .quiet()
         const buffer = await Filesystem.readBytes(tmpfile)
         return { data: buffer.toString("base64"), mime: "image/png" }
       } catch {
-        // Timeout or error - clipboard may be empty or inaccessible
       } finally {
         await $`rm -f "${tmpfile}"`.nothrow().quiet()
       }
     }
 
-    // Use improved WSL detection
-    const isRunningInWSL = isWSL()
-    if (os === "win32" || isRunningInWSL) {
+    if (os === "win32" || release().includes("WSL")) {
       const script =
         "Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($img) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [System.Convert]::ToBase64String($ms.ToArray()) }"
-      try {
-        const base64 = await withTimeout(
-          $`powershell.exe -NonInteractive -NoProfile -command "${script}"`.nothrow().text(),
-          DEFAULT_TIMEOUT_MS,
-        )
-        if (base64) {
-          const imageBuffer = Buffer.from(base64.trim(), "base64")
-          if (imageBuffer.length > 0) {
-            return { data: imageBuffer.toString("base64"), mime: "image/png" }
-          }
+      const base64 = await $`powershell.exe -NonInteractive -NoProfile -command "${script}"`.nothrow().text()
+      if (base64) {
+        const imageBuffer = Buffer.from(base64.trim(), "base64")
+        if (imageBuffer.length > 0) {
+          return { data: imageBuffer.toString("base64"), mime: "image/png" }
         }
-      } catch {
-        // Timeout or error
       }
     }
 
     if (os === "linux") {
-      try {
-        const wayland = await withTimeout(
-          $`wl-paste -t image/png`.nothrow().arrayBuffer(),
-          DEFAULT_TIMEOUT_MS,
-        )
-        if (wayland && wayland.byteLength > 0) {
-          return { data: Buffer.from(wayland).toString("base64"), mime: "image/png" }
-        }
-      } catch {
-        // Timeout or error, try x11 fallback
+      const wayland = await $`wl-paste -t image/png`.nothrow().arrayBuffer()
+      if (wayland && wayland.byteLength > 0) {
+        return { data: Buffer.from(wayland).toString("base64"), mime: "image/png" }
       }
-      try {
-        const x11 = await withTimeout(
-          $`xclip -selection clipboard -t image/png -o`.nothrow().arrayBuffer(),
-          DEFAULT_TIMEOUT_MS,
-        )
-        if (x11 && x11.byteLength > 0) {
-          return { data: Buffer.from(x11).toString("base64"), mime: "image/png" }
-        }
-      } catch {
-        // Timeout or error
+      const x11 = await $`xclip -selection clipboard -t image/png -o`.nothrow().arrayBuffer()
+      if (x11 && x11.byteLength > 0) {
+        return { data: Buffer.from(x11).toString("base64"), mime: "image/png" }
       }
     }
 
-    // Fallback to clipboardy with timeout
-    try {
-      const text = await withTimeout(clipboardy.read(), DEFAULT_TIMEOUT_MS)
-      if (text) {
-        return { data: text, mime: "text/plain" }
-      }
-    } catch {
-      // Timeout or error
+    const text = await clipboardy.read().catch(() => {})
+    if (text) {
+      return { data: text, mime: "text/plain" }
     }
   }
 
   const getCopyMethod = lazy(() => {
     const os = platform()
 
-    if (os === "darwin" && Bun.which("osascript")) {
+    if (os === "darwin" && which("osascript")) {
+      console.log("clipboard: using osascript")
       return async (text: string) => {
         const escaped = text.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
         await $`osascript -e 'set the clipboard to "${escaped}"'`.nothrow().quiet()
@@ -145,7 +86,8 @@ export namespace Clipboard {
     }
 
     if (os === "linux") {
-      if (process.env["WAYLAND_DISPLAY"] && Bun.which("wl-copy")) {
+      if (process.env["WAYLAND_DISPLAY"] && which("wl-copy")) {
+        console.log("clipboard: using wl-copy")
         return async (text: string) => {
           const proc = Process.spawn(["wl-copy"], { stdin: "pipe", stdout: "ignore", stderr: "ignore" })
           if (!proc.stdin) return
@@ -154,7 +96,8 @@ export namespace Clipboard {
           await proc.exited.catch(() => {})
         }
       }
-      if (Bun.which("xclip")) {
+      if (which("xclip")) {
+        console.log("clipboard: using xclip")
         return async (text: string) => {
           const proc = Process.spawn(["xclip", "-selection", "clipboard"], {
             stdin: "pipe",
@@ -167,7 +110,8 @@ export namespace Clipboard {
           await proc.exited.catch(() => {})
         }
       }
-      if (Bun.which("xsel")) {
+      if (which("xsel")) {
+        console.log("clipboard: using xsel")
         return async (text: string) => {
           const proc = Process.spawn(["xsel", "--clipboard", "--input"], {
             stdin: "pipe",
@@ -183,6 +127,7 @@ export namespace Clipboard {
     }
 
     if (os === "win32") {
+      console.log("clipboard: using powershell")
       return async (text: string) => {
         // Pipe via stdin to avoid PowerShell string interpolation ($env:FOO, $(), etc.)
         const proc = Process.spawn(
@@ -207,7 +152,7 @@ export namespace Clipboard {
       }
     }
 
-    // Fallback to clipboardy for unsupported platforms
+    console.log("clipboard: no native support")
     return async (text: string) => {
       await clipboardy.write(text).catch(() => {})
     }

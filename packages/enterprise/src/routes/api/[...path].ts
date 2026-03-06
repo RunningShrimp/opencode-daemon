@@ -6,68 +6,11 @@ import z from "zod"
 import { cors } from "hono/cors"
 import { Share } from "~/core/share"
 
-/**
- * 获取允许的 CORS 来源
- * 生产环境应从环境变量 ALLOWED_ORIGINS 读取，多个来源用逗号分隔
- * 开发环境允许本地开发
- */
-function getAllowedOrigins(): string[] {
-  const envOrigins = process.env.ALLOWED_ORIGINS
-  if (envOrigins) {
-    return envOrigins.split(",").map((origin) => origin.trim())
-  }
-
-  // 开发环境允许的来源
-  const devOrigins = [
-    "http://localhost:3000",
-    "http://localhost:3001",
-    "http://localhost:5173",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:3001",
-    "http://127.0.0.1:5173",
-  ]
-
-  // 生产环境返回空数组，默认拒绝所有跨域请求
-  // 如果需要支持特定域名，请设置环境变量 ALLOWED_ORIGINS
-  if (process.env.NODE_ENV === "production") {
-    return []
-  }
-
-  return devOrigins
-}
-
-/**
- * CORS 中间件配置
- * 仅允许已配置的来源访问 API
- */
-const corsMiddleware = cors({
-  origin: (origin) => {
-    const allowedOrigins = getAllowedOrigins()
-
-    // 如果没有配置允许的来源，拒绝所有请求
-    if (allowedOrigins.length === 0) {
-      return origin // 返回请求Origin，但在响应中不会设置Access-Control-Allow-Origin
-    }
-
-    // 检查请求来源是否在允许列表中
-    if (allowedOrigins.includes(origin)) {
-      return origin
-    }
-
-    // 不在允许列表中，返回 undefined 拒绝请求
-    return undefined
-  },
-  credentials: true,
-  allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept", "Origin"],
-  maxAge: 86400, // 预检请求缓存 24 小时
-})
-
 const app = new Hono()
 
 app
   .basePath("/api")
-  .use(corsMiddleware)
+  .use(cors())
   .get(
     "/doc",
     openAPIRouteHandler(app, {
@@ -165,6 +108,7 @@ app
     validator("param", z.object({ shareID: z.string() })),
     async (c) => {
       const { shareID } = c.req.valid("param")
+      c.header("Cache-Control", "public, max-age=30, s-maxage=300, stale-while-revalidate=86400")
       return c.json(await Share.data(shareID))
     },
   )

@@ -1,6 +1,7 @@
 import { $ } from "bun"
 import path from "path"
 import fs from "fs/promises"
+import { Filesystem } from "../util/filesystem"
 import { Log } from "../util/log"
 import { Flag } from "../flag/flag"
 import { Global } from "../global"
@@ -62,10 +63,11 @@ export namespace Snapshot {
         })
         .quiet()
         .nothrow()
-      // Configure git to not convert line endings on Windows - 合并为单次调用
-      await $`git --git-dir ${git} config core.autocrlf false && git --git-dir ${git} config core.longpaths true && git --git-dir ${git} config core.symlinks true && git --git-dir ${git} config core.fsmonitor false`
-        .quiet()
-        .nothrow()
+      // Configure git to not convert line endings on Windows
+      await $`git --git-dir ${git} config core.autocrlf false`.quiet().nothrow()
+      await $`git --git-dir ${git} config core.longpaths true`.quiet().nothrow()
+      await $`git --git-dir ${git} config core.symlinks true`.quiet().nothrow()
+      await $`git --git-dir ${git} config core.fsmonitor false`.quiet().nothrow()
       log.info("initialized")
     }
     await add(git)
@@ -257,21 +259,8 @@ export namespace Snapshot {
     return path.join(Global.Path.data, "snapshot", project.id)
   }
 
-  /**
-   * Add files to git index incrementally.
-   * Only adds files that have been modified or are new (not ignored).
-   * Uses git add -u for modified files and git add for new files.
-   */
   async function add(git: string) {
     await syncExclude(git)
-
-    // First, add only modified files (not new untracked files)
-    await $`git -c core.autocrlf=false -c core.longpaths=true -c core.symlinks=true --git-dir ${git} --work-tree ${Instance.worktree} add -u`
-      .quiet()
-      .cwd(Instance.directory)
-      .nothrow()
-
-    // Then add new untracked files (excluding ignored files)
     await $`git -c core.autocrlf=false -c core.longpaths=true -c core.symlinks=true --git-dir ${git} --work-tree ${Instance.worktree} add .`
       .quiet()
       .cwd(Instance.directory)
@@ -283,13 +272,12 @@ export namespace Snapshot {
     const target = path.join(git, "info", "exclude")
     await fs.mkdir(path.join(git, "info"), { recursive: true })
     if (!file) {
-      await Bun.write(target, "")
+      await Filesystem.write(target, "")
       return
     }
-    const text = await Bun.file(file)
-      .text()
-      .catch(() => "")
-    await Bun.write(target, text)
+    const text = await Filesystem.readText(file).catch(() => "")
+
+    await Filesystem.write(target, text)
   }
 
   async function excludes() {

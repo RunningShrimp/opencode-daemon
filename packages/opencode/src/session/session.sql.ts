@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, real, index, primaryKey } from "drizzle-orm/sqlite-core"
+import { sqliteTable, text, integer, index, primaryKey } from "drizzle-orm/sqlite-core"
 import { ProjectTable } from "../project/project.sql"
 import type { MessageV2 } from "./message-v2"
 import type { Snapshot } from "@/snapshot"
@@ -47,12 +47,9 @@ export const MessageTable = sqliteTable(
       .notNull()
       .references(() => SessionTable.id, { onDelete: "cascade" }),
     ...Timestamps,
-    data: text({ mode: "json" }).$type<InfoData>(),
+    data: text({ mode: "json" }).notNull().$type<InfoData>(),
   },
-  (table) => [
-    index("message_session_idx").on(table.session_id),
-    index("message_session_time_idx").on(table.session_id, table.time_created),
-  ],
+  (table) => [index("message_session_idx").on(table.session_id)],
 )
 
 export const PartTable = sqliteTable(
@@ -66,11 +63,7 @@ export const PartTable = sqliteTable(
     ...Timestamps,
     data: text({ mode: "json" }).notNull().$type<PartData>(),
   },
-  (table) => [
-    index("part_message_idx").on(table.message_id),
-    index("part_session_idx").on(table.session_id),
-    index("part_message_id_idx").on(table.message_id, table.id),
-  ],
+  (table) => [index("part_message_idx").on(table.message_id), index("part_session_idx").on(table.session_id)],
 )
 
 export const TodoTable = sqliteTable(
@@ -98,24 +91,3 @@ export const PermissionTable = sqliteTable("permission", {
   ...Timestamps,
   data: text({ mode: "json" }).notNull().$type<PermissionNext.Ruleset>(),
 })
-
-export const ThoughtNodeTable = sqliteTable(
-  "thought_node",
-  {
-    id: text().primaryKey(),
-    session_id: text()
-      .notNull()
-      .references(() => SessionTable.id, { onDelete: "cascade" }),
-    parent_id: text(),
-    content: text().notNull(),
-    score: real().notNull(),
-    children: text(),
-    depth: integer().notNull(),
-    metadata: text({ mode: "json" }),
-    created_at: integer().notNull(),
-  },
-  (table) => [
-    index("thought_node_session_idx").on(table.session_id),
-    index("thought_node_parent_idx").on(table.parent_id),
-  ],
-)

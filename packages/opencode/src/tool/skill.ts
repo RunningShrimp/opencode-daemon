@@ -5,6 +5,7 @@ import { Tool } from "./tool"
 import { Skill } from "../skill"
 import { PermissionNext } from "../permission/next"
 import { Ripgrep } from "../file/ripgrep"
+import { iife } from "@/util/iife"
 
 export const SkillTool = Tool.define("skill", async (ctx) => {
   const skills = await Skill.all()
@@ -61,34 +62,23 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
       const skill = await Skill.get(params.name)
 
       if (!skill) {
-        // 复用已加载的 skills，避免重复调用
-        const skillsList = await Skill.all()
-        const available = skillsList.map((s) => s.name).join(", ")
+        const available = await Skill.all().then((x) => Object.keys(x).join(", "))
         throw new Error(`Skill "${params.name}" not found. Available skills: ${available || "none"}`)
       }
 
-      // 添加权限拒绝异常处理
-      try {
-        await ctx.ask({
-          permission: "skill",
-          patterns: [params.name],
-          always: [params.name],
-          metadata: {},
-        })
-      } catch (error) {
-        if (error instanceof PermissionNext.DeniedError) {
-          throw new Error(`Permission denied for skill "${params.name}". ${error.message || "User rejected the permission request."}`)
-        }
-        throw error
-      }
+      await ctx.ask({
+        permission: "skill",
+        patterns: [params.name],
+        always: [params.name],
+        metadata: {},
+      })
 
       const dir = path.dirname(skill.location)
       const base = pathToFileURL(dir).href
 
       const limit = 10
-      // 移除无用的 iife 包装，直接使用 async 函数
-      const files = await (async () => {
-        const arr: string[] = []
+      const files = await iife(async () => {
+        const arr = []
         for await (const file of Ripgrep.files({
           cwd: dir,
           follow: false,
@@ -104,7 +94,7 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
           }
         }
         return arr
-      })().then((f) => f.map((file) => `<file>${file}</file>`).join("\n"))
+      }).then((f) => f.map((file) => `<file>${file}</file>`).join("\n"))
 
       return {
         title: `Loaded skill: ${skill.name}`,

@@ -1,44 +1,17 @@
 import { createSignal, onCleanup, onMount, splitProps, type ComponentProps, Show, mergeProps } from "solid-js"
 import { useI18n } from "../context/i18n"
 
-/**
- * ScrollView 事件处理器类型定义
- */
-export interface ScrollViewEvents {
-  /** 滚动事件处理器 */
-  onScroll?: (e: Event) => void
-  /** 滚轮事件处理器 */
-  onWheel?: (e: WheelEvent) => void
-  /** 触摸开始事件处理器 */
-  onTouchStart?: (e: TouchEvent) => void
-  /** 触摸移动事件处理器 */
-  onTouchMove?: (e: TouchEvent) => void
-  /** 触摸结束事件处理器 */
-  onTouchEnd?: (e: TouchEvent) => void
-  /** 触摸取消事件处理器 */
-  onTouchCancel?: (e: TouchEvent) => void
-  /** 指针按下事件处理器 */
-  onPointerDown?: (e: PointerEvent) => void
-  /** 点击事件处理器 */
-  onClick?: (e: MouseEvent) => void
-  /** 键盘事件处理器 */
-  onKeyDown?: (e: KeyboardEvent) => void
-}
-
 export interface ScrollViewProps extends ComponentProps<"div"> {
   viewportRef?: (el: HTMLDivElement) => void
   orientation?: "vertical" | "horizontal" // currently only vertical is fully implemented for thumb
-  /** ScrollView 事件处理器 */
-  events?: ScrollViewEvents
 }
 
 export function ScrollView(props: ScrollViewProps) {
   const i18n = useI18n()
   const merged = mergeProps({ orientation: "vertical" }, props)
-  const [local, , rest] = splitProps(
+  const [local, events, rest] = splitProps(
     merged,
-    ["class", "children", "viewportRef", "orientation", "style", "events"],
-    // 基础事件从 props 中提取
+    ["class", "children", "viewportRef", "orientation", "style"],
     [
       "onScroll",
       "onWheel",
@@ -51,25 +24,6 @@ export function ScrollView(props: ScrollViewProps) {
       "onKeyDown",
     ],
   )
-
-  // 使用 events 属性或直接属性作为回调
-  // 注意：SolidJS 的事件处理器类型与我们的接口不完全兼容，需要进行类型转换
-  const events = (): ScrollViewEvents => {
-    const ev = props.events
-    if (ev) return ev
-    // 兼容旧的直接属性方式 - 使用类型断言
-    return {
-      onScroll: merged.onScroll as ScrollViewEvents["onScroll"],
-      onWheel: merged.onWheel as ScrollViewEvents["onWheel"],
-      onTouchStart: merged.onTouchStart as ScrollViewEvents["onTouchStart"],
-      onTouchMove: merged.onTouchMove as ScrollViewEvents["onTouchMove"],
-      onTouchEnd: merged.onTouchEnd as ScrollViewEvents["onTouchEnd"],
-      onTouchCancel: merged.onTouchCancel as ScrollViewEvents["onTouchCancel"],
-      onPointerDown: merged.onPointerDown as ScrollViewEvents["onPointerDown"],
-      onClick: merged.onClick as ScrollViewEvents["onClick"],
-      onKeyDown: merged.onKeyDown as ScrollViewEvents["onKeyDown"],
-    }
-  }
 
   let rootRef!: HTMLDivElement
   let viewportRef!: HTMLDivElement
@@ -225,23 +179,21 @@ export function ScrollView(props: ScrollViewProps) {
         class="scroll-view__viewport"
         onScroll={(e) => {
           updateThumb()
-          const ev = events()
-          if (typeof ev.onScroll === "function") ev.onScroll(e)
+          if (typeof events.onScroll === "function") events.onScroll(e as any)
         }}
-        onWheel={events().onWheel}
-        onTouchStart={events().onTouchStart}
-        onTouchMove={events().onTouchMove}
-        onTouchEnd={events().onTouchEnd}
-        onTouchCancel={events().onTouchCancel}
-        onPointerDown={events().onPointerDown}
-        onClick={events().onClick}
+        onWheel={events.onWheel as any}
+        onTouchStart={events.onTouchStart as any}
+        onTouchMove={events.onTouchMove as any}
+        onTouchEnd={events.onTouchEnd as any}
+        onTouchCancel={events.onTouchCancel as any}
+        onPointerDown={events.onPointerDown as any}
+        onClick={events.onClick as any}
         tabIndex={0}
         role="region"
         aria-label={i18n.t("ui.scrollView.ariaLabel")}
         onKeyDown={(e) => {
           onKeyDown(e)
-          const ev = events()
-          if (typeof ev.onKeyDown === "function") ev.onKeyDown(e)
+          if (typeof events.onKeyDown === "function") events.onKeyDown(e as any)
         }}
       >
         {local.children}

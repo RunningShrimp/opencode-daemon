@@ -45,9 +45,6 @@ import { LLM } from "./llm"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
-import { getController, removeController } from "@/util/dynamic-turn-control"
-import { getImageRouter, processImages } from "./image-router"
-import { Config } from "../config/config"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -267,8 +264,6 @@ export namespace SessionPrompt {
     match.abort.abort()
     delete s[sessionID]
     SessionStatus.set(sessionID, { type: "idle" })
-    // Clean up turn controller to prevent memory leak
-    removeController(sessionID)
     return
   }
 
@@ -296,32 +291,10 @@ export namespace SessionPrompt {
 
     let step = 0
     const session = await Session.get(sessionID)
-
-    // Initialize dynamic turn controller for cost optimization
-    const turnController = getController(sessionID)
-    await turnController.initialize("moderate")
-    let totalTokens = 0
-
     while (true) {
       SessionStatus.set(sessionID, { type: "busy" })
       log.info("loop", { step, sessionID })
-      if (abort.aborted) {
-        log.info("loop aborted", { sessionID, step })
-        break
-      }
-
-      // Check if we should continue based on dynamic turn control
-      const turnResult = turnController.shouldContinue(totalTokens)
-      if (!turnResult.shouldContinue && step > 0) {
-        log.info("turn control: stopping early", {
-          sessionID,
-          reason: turnResult.reason,
-          confidence: turnResult.confidence,
-          step,
-        })
-        break
-      }
-
+      if (abort.aborted) break
       let msgs = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
 
       let lastUser: MessageV2.User | undefined
@@ -342,34 +315,12 @@ export namespace SessionPrompt {
       }
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
-
-      // Debug logging for exit condition
-      const lastFinishedFinish = lastFinished?.finish
-      const lastAssistantFinish = lastAssistant?.finish
-      // Use lastFinished.finish with proper type checking
-      const canExitBasedOnLastFinished =
-        lastFinished &&
-        lastFinishedFinish !== undefined &&
-        !["tool-calls", "unknown"].includes(lastFinishedFinish) &&
-        lastUser.id < lastFinished.id
-
-      // Use lastFinished (has finish state) for exit condition check, not lastAssistant
-      // lastAssistant may not have finish state (e.g., in-progress message)
-      // lastFinished specifically indicates an assistant message with finish state
-      log.debug("exit condition check", {
-        sessionID,
-        step,
-        lastUserId: lastUser.id,
-        lastAssistantId: lastAssistant?.id,
-        lastAssistantFinish,
-        lastFinishedId: lastFinished?.id,
-        lastFinishedFinish,
-        canExitBasedOnLastFinished,
-        tasksCount: tasks.length,
-      })
-
-      if (canExitBasedOnLastFinished && lastFinished) {
-        log.info("exiting loop", { sessionID, lastFinishedId: lastFinished.id, finish: lastFinished.finish })
+      if (
+        lastAssistant?.finish &&
+        !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
+        lastUser.id < lastAssistant.id
+      ) {
+        log.info("exiting loop", { sessionID })
         break
       }
 
@@ -513,18 +464,6 @@ export namespace SessionPrompt {
         assistantMessage.finish = "tool-calls"
         assistantMessage.time.completed = Date.now()
         await Session.updateMessage(assistantMessage)
-
-        // Debug: log subtask completion status
-        log.info("subtask completed", {
-          sessionID,
-          step,
-          taskAgent: task.agent,
-          taskDescription: task.description,
-          hasCommand: !!task.command,
-          tasksRemaining: tasks.length,
-          assistantMessageId: assistantMessage.id,
-        })
-
         if (result && part.state.status === "running") {
           await Session.updatePart({
             ...part,
@@ -772,17 +711,6 @@ export namespace SessionPrompt {
           overflow: !processor.message.finish,
         })
       }
-
-      // Record turn result for dynamic turn control (cost optimization)
-      const turnSuccess = !processor.message.error
-      const turnTokens = processor.message.tokens.input + processor.message.tokens.output
-      totalTokens += turnTokens
-      turnController.record(turnSuccess, {
-        input: processor.message.tokens.input,
-        output: processor.message.tokens.output,
-        total: turnTokens,
-      })
-
       continue
     }
     SessionCompaction.prune({ sessionID })
@@ -1365,38 +1293,6 @@ export namespace SessionPrompt {
         ]
       }),
     ).then((x) => x.flat().map(assign))
-
-    // Image understanding: detect and interpret images in the message
-    try {
-      const config = await Config.get()
-      if (config.imageUnderstanding?.enabled !== false) {
-        const imageInterpretation = await processImages(input.parts, "", {
-          currentModel: model,
-          preferMcp: config.imageUnderstanding?.preferMcp,
-          budget: config.imageUnderstanding?.budget,
-          sessionID: input.sessionID,
-        })
-
-        if (imageInterpretation && !imageInterpretation.isFallback) {
-          // Add interpretation as a synthetic text part
-          const interpretationPart: Draft<MessageV2.Part> = {
-            messageID: info.id,
-            sessionID: input.sessionID,
-            type: "text",
-            synthetic: true,
-            text: `[Image Understanding]\n${imageInterpretation.text}`,
-          }
-          parts.push(interpretationPart)
-          log.debug("added image interpretation", {
-            strategy: imageInterpretation.strategy.type,
-            processingTime: imageInterpretation.processingTime,
-          })
-        }
-      }
-    } catch (error) {
-      // Log error but don't fail message creation
-      log.error("image understanding failed", { error })
-    }
 
     await Plugin.trigger(
       "chat.message",

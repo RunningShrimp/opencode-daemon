@@ -17,9 +17,6 @@ import { readdir } from "fs/promises"
 
 const SUBSCRIBE_TIMEOUT_MS = 10_000
 
-// 事件聚合和节流配置
-const EVENT_FLUSH_INTERVAL_MS = 100 // 每100ms批量发布一次事件
-
 declare const OPENCODE_LIBC: string | undefined
 
 export namespace FileWatcher {
@@ -33,31 +30,6 @@ export namespace FileWatcher {
         event: z.union([z.literal("add"), z.literal("change"), z.literal("unlink")]),
       }),
     ),
-  }
-
-  // 事件聚合状态
-  let pendingEvents = new Map<string, { type: string; path: string }>()
-  let flushTimeout: ReturnType<typeof setTimeout> | null = null
-
-  // 刷新pending events到Bus
-  function flushEvents() {
-    if (pendingEvents.size === 0) return
-    
-    for (const { type, path } of pendingEvents.values()) {
-      if (type === "create") Bus.publish(Event.Updated, { file: path, event: "add" })
-      if (type === "update") Bus.publish(Event.Updated, { file: path, event: "change" })
-      if (type === "delete") Bus.publish(Event.Updated, { file: path, event: "unlink" })
-    }
-    pendingEvents.clear()
-  }
-
-  // 定时刷新事件（带节流）
-  function scheduleFlush() {
-    if (flushTimeout) return
-    flushTimeout = setTimeout(() => {
-      flushEvents()
-      flushTimeout = null
-    }, EVENT_FLUSH_INTERVAL_MS)
   }
 
   const watcher = lazy((): typeof import("@parcel/watcher") | undefined => {
@@ -93,12 +65,10 @@ export namespace FileWatcher {
       const subscribe: ParcelWatcher.SubscribeCallback = (err, evts) => {
         if (err) return
         for (const evt of evts) {
-          // 使用 Map 去重，相同文件的多次变化只保留最后一次
-          const key = `${evt.type}:${evt.path}`
-          pendingEvents.set(key, { type: evt.type, path: evt.path })
+          if (evt.type === "create") Bus.publish(Event.Updated, { file: evt.path, event: "add" })
+          if (evt.type === "update") Bus.publish(Event.Updated, { file: evt.path, event: "change" })
+          if (evt.type === "delete") Bus.publish(Event.Updated, { file: evt.path, event: "unlink" })
         }
-        // 调度刷新
-        scheduleFlush()
       }
 
       const subs: ParcelWatcher.AsyncSubscription[] = []

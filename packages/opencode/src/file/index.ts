@@ -11,7 +11,6 @@ import { Instance } from "../project/instance"
 import { Ripgrep } from "./ripgrep"
 import fuzzysort from "fuzzysort"
 import { Global } from "../global"
-import { getOrSet } from "../util/cache"
 
 export namespace File {
   const log = Log.create({ service: "file" })
@@ -415,43 +414,17 @@ export namespace File {
     state()
   }
 
-  const GIT_STATUS_CACHE_TTL = 1000 // 1秒缓存
-
   export async function status() {
     const project = Instance.project
     if (project.vcs !== "git") return []
 
-    // 使用缓存避免频繁调用 git status
-    const cacheKey = `git-status:${Instance.directory}`
-    return getOrSet(
-      "idempotency",
-      cacheKey,
-      async () => await computeGitStatus(),
-      { ttl: GIT_STATUS_CACHE_TTL },
-    ) as Promise<Info[]>
-  }
+    const diffOutput = await $`git -c core.fsmonitor=false -c core.quotepath=false diff --numstat HEAD`
+      .cwd(Instance.directory)
+      .quiet()
+      .nothrow()
+      .text()
 
-  async function computeGitStatus(): Promise<Info[]> {
     const changedFiles: Info[] = []
-
-    // 并行执行所有 git 查询以提升性能
-    const [diffOutput, untrackedOutput, deletedOutput] = await Promise.all([
-      $`git -c core.quotepath=false diff --numstat HEAD`
-        .cwd(Instance.directory)
-        .quiet()
-        .nothrow()
-        .text(),
-      $`git -c core.quotepath=false ls-files --others --exclude-standard`
-        .cwd(Instance.directory)
-        .quiet()
-        .nothrow()
-        .text(),
-      $`git -c core.quotepath=false diff --name-only --diff-filter=D HEAD`
-        .cwd(Instance.directory)
-        .quiet()
-        .nothrow()
-        .text(),
-    ])
 
     if (diffOutput.trim()) {
       const lines = diffOutput.trim().split("\n")
@@ -466,29 +439,38 @@ export namespace File {
       }
     }
 
+    const untrackedOutput =
+      await $`git -c core.fsmonitor=false -c core.quotepath=false ls-files --others --exclude-standard`
+        .cwd(Instance.directory)
+        .quiet()
+        .nothrow()
+        .text()
+
     if (untrackedOutput.trim()) {
       const untrackedFiles = untrackedOutput.trim().split("\n")
-      // 批量读取未跟踪文件内容（并行）
-      const fileReadPromises = untrackedFiles.map(async (filepath) => {
+      for (const filepath of untrackedFiles) {
         try {
           const content = await Filesystem.readText(path.join(Instance.directory, filepath))
-          return { filepath, lines: content.split("\n").length }
-        } catch {
-          return null
-        }
-      })
-      const fileResults = await Promise.all(fileReadPromises)
-      for (const result of fileResults) {
-        if (result) {
+          const lines = content.split("\n").length
           changedFiles.push({
-            path: result.filepath,
-            added: result.lines,
+            path: filepath,
+            added: lines,
             removed: 0,
             status: "added",
           })
+        } catch {
+          continue
         }
       }
     }
+
+    // Get deleted files
+    const deletedOutput =
+      await $`git -c core.fsmonitor=false -c core.quotepath=false diff --name-only --diff-filter=D HEAD`
+        .cwd(Instance.directory)
+        .quiet()
+        .nothrow()
+        .text()
 
     if (deletedOutput.trim()) {
       const deletedFiles = deletedOutput.trim().split("\n")
@@ -496,7 +478,7 @@ export namespace File {
         changedFiles.push({
           path: filepath,
           added: 0,
-          removed: 0,
+          removed: 0, // Could get original line count but would require another git command
           status: "deleted",
         })
       }
@@ -559,19 +541,16 @@ export namespace File {
     const content = (await Filesystem.readText(full).catch(() => "")).trim()
 
     if (project.vcs === "git") {
-      // 使用单个命令获取 HEAD、staged 和 unstaged 的所有差异
-      const diffOutput = await $`git diff HEAD -- ${file}`
-        .cwd(Instance.directory)
-        .quiet()
-        .nothrow()
-        .text()
-
-      if (diffOutput.trim()) {
-        const original = await $`git show HEAD:${file}`
+      let diff = await $`git -c core.fsmonitor=false diff ${file}`.cwd(Instance.directory).quiet().nothrow().text()
+      if (!diff.trim()) {
+        diff = await $`git -c core.fsmonitor=false diff --staged ${file}`
           .cwd(Instance.directory)
           .quiet()
           .nothrow()
           .text()
+      }
+      if (diff.trim()) {
+        const original = await $`git show HEAD:${file}`.cwd(Instance.directory).quiet().nothrow().text()
         const patch = structuredPatch(file, file, original, content, "old", "new", {
           context: Infinity,
           ignoreWhitespace: true,
