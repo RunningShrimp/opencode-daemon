@@ -25,7 +25,7 @@ import { createSimpleContext } from "./helper"
 import type { Snapshot } from "@/snapshot"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
-import { batch, onMount } from "solid-js"
+import { batch, onMount, onCleanup } from "solid-js"
 import { Log } from "@/util/log"
 import type { Path } from "@opencode-ai/sdk"
 
@@ -104,7 +104,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
     const sdk = useSDK()
 
-    sdk.event.listen((e) => {
+    // 保存事件监听器的取消订阅函数
+    let unlisten: (() => void) | undefined
+
+    // 注册事件监听器
+    unlisten = sdk.event.listen((e) => {
       const event = e.details
       switch (event.type) {
         case "server.instance.disposed":
@@ -359,6 +363,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           setStore("vcs", { branch: event.properties.branch })
           break
         }
+      }
+    })
+
+    // 组件卸载时清理事件监听器
+    onCleanup(() => {
+      if (unlisten) {
+        unlisten()
       }
     })
 

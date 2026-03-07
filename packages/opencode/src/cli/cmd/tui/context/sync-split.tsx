@@ -37,7 +37,7 @@ import { createSimpleContext } from "./helper"
 import type { Snapshot } from "@/snapshot"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
-import { batch, onMount, createContext, useContext, type ParentProps, type Accessor } from "solid-js"
+import { batch, onMount, onCleanup, createContext, useContext, type ParentProps, type Accessor } from "solid-js"
 import { Log } from "@/util/log"
 import type { Path } from "@opencode-ai/sdk"
 
@@ -260,8 +260,11 @@ export function SessionProvider(props: ParentProps & { children: any; sdk: any; 
     },
   }
 
+  // 保存事件监听器的取消订阅函数
+  let unlisten: (() => void) | undefined
+
   // Listen to session-related events
-  props.sdk.event.listen((e: any) => {
+  unlisten = props.sdk.event.listen((e: any) => {
     const event = e.details
     switch (event.type) {
       case "permission.replied":
@@ -305,6 +308,13 @@ export function SessionProvider(props: ParentProps & { children: any; sdk: any; 
     }
   })
 
+  // 组件卸载时清理事件监听器
+  onCleanup(() => {
+    if (unlisten) {
+      unlisten()
+    }
+  })
+
   return (
     <SessionContext.Provider value={value}>
       {props.children}
@@ -327,8 +337,11 @@ export function MessagesProvider(props: ParentProps & { children: any; sdk: any 
     part: {},
   })
 
+  // 保存事件监听器的取消订阅函数
+  let unlisten: (() => void) | undefined
+
   // Listen to message-related events
-  props.sdk.event.listen((e: any) => {
+  unlisten = props.sdk.event.listen((e: any) => {
     const event = e.details
     switch (event.type) {
       case "message.updated": {
@@ -407,6 +420,13 @@ export function MessagesProvider(props: ParentProps & { children: any; sdk: any 
     }
   })
 
+  // 组件卸载时清理事件监听器
+  onCleanup(() => {
+    if (unlisten) {
+      unlisten()
+    }
+  })
+
   return (
     <MessagesContext.Provider value={{ data: store, set: setStore }}>
       {props.children}
@@ -433,8 +453,11 @@ export function SystemStatusProvider(props: ParentProps & { children: any; sdk: 
     path: { state: "", config: "", worktree: "", directory: "" },
   })
 
+  // 保存事件监听器的取消订阅函数
+  let unlisten: (() => void) | undefined
+
   // Listen to system status events
-  props.sdk.event.listen((e: any) => {
+  unlisten = props.sdk.event.listen((e: any) => {
     const event = e.details
     switch (event.type) {
       case "lsp.updated":
@@ -443,6 +466,13 @@ export function SystemStatusProvider(props: ParentProps & { children: any; sdk: 
       case "vcs.branch.updated":
         setStore("vcs", { branch: event.properties.branch })
         break
+    }
+  })
+
+  // 组件卸载时清理事件监听器
+  onCleanup(() => {
+    if (unlisten) {
+      unlisten()
     }
   })
 
@@ -507,8 +537,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     const args = useArgs()
     const fullSyncedSessions = new Set<string>()
 
+    // 保存事件监听器的取消订阅函数
+    let unlisten: (() => void) | undefined
+
     // Unified event handler
-    sdk.event.listen((e) => {
+    unlisten = sdk.event.listen((e) => {
       const event = e.details
       switch (event.type) {
         case "server.instance.disposed":
@@ -744,6 +777,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
     onMount(() => {
       bootstrap()
+    })
+
+    // 组件卸载时清理事件监听器
+    onCleanup(() => {
+      if (unlisten) {
+        unlisten()
+      }
     })
 
     const result: SyncContextValue = {
