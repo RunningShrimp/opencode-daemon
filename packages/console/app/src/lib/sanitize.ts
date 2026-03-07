@@ -64,44 +64,112 @@ export function isSafeUrl(url: string, baseUrl?: string): boolean {
 
 /**
  * 净化 HTML 内容
- * 移除危险的标签和属性，保留基本格式
+ * 使用白名单策略移除危险的标签和属性，保留基本格式
  * @param html 要净化的 HTML 字符串
  * @returns 净化后的 HTML 字符串
  */
 export function sanitizeHtml(html: string | undefined | null): string {
   if (html === undefined || html === null) return ""
 
-  // 1. 转义 HTML 实体（基本防护）
-  let sanitized = escapeHtml(html)
+  // 使用 DOMParser 解析 HTML 字符串
+  const parser = new DOMParser()
+  const doc = parser.parseFromString(html, "text/html")
+  const body = doc.body
 
-  // 2. 移除危险的事件处理器属性
-  const dangerousAttrs = [
-    /on\w+\s*=/gi, // onClick, onMouseOver, etc.
-    /javascript:/gi,
-    /data:/gi,
-    /vbscript:/gi,
-  ]
+  // 允许的基础格式标签白名单
+  const ALLOWED_TAGS = new Set<string>([
+    "A",
+    "B",
+    "I",
+    "EM",
+    "STRONG",
+    "U",
+    "S",
+    "SPAN",
+    "P",
+    "BR",
+    "DIV",
+    "UL",
+    "OL",
+    "LI",
+    "PRE",
+    "CODE",
+    "BLOCKQUOTE",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5",
+    "H6",
+  ])
 
-  for (const pattern of dangerousAttrs) {
-    sanitized = sanitized.replace(pattern, "")
+  // 允许的通用属性白名单
+  const ALLOWED_ATTRS = new Set<string>([
+    "href",
+    "src",
+    "alt",
+    "title",
+    "class",
+    "id",
+    "rel",
+    "target",
+  ])
+
+  const sanitizeNode = (node: Node): void => {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const el = node as HTMLElement
+      const tagName = el.tagName.toUpperCase()
+
+      // 如果标签不在白名单中，则移除标签但保留其子节点（尽量保留文本内容）
+      if (!ALLOWED_TAGS.has(tagName)) {
+        const parent = el.parentNode
+        if (parent) {
+          while (el.firstChild) {
+            parent.insertBefore(el.firstChild, el)
+          }
+          parent.removeChild(el)
+        }
+        return
+      }
+
+      // 清理不安全属性
+      const attributes = Array.from(el.attributes)
+      for (const attr of attributes) {
+        const name = attr.name.toLowerCase()
+
+        // 移除所有事件处理器属性（onClick 等）
+        if (name.startsWith("on")) {
+          el.removeAttribute(attr.name)
+          continue
+        }
+
+        // 只保留白名单属性
+        if (!ALLOWED_ATTRS.has(name)) {
+          el.removeAttribute(attr.name)
+          continue
+        }
+
+        // 特殊处理 URL 属性
+        if (name === "href" || name === "src") {
+          const value = attr.value
+          if (!isSafeUrl(value)) {
+            el.removeAttribute(attr.name)
+          }
+        }
+      }
+    }
+
+    // 递归处理子节点
+    let child = node.firstChild
+    while (child) {
+      const next = child.nextSibling
+      sanitizeNode(child)
+      child = next
+    }
   }
 
-  // 3. 移除危险标签
-  const dangerousTags = ["script", "iframe", "object", "embed", "form", "input", "button", "link"]
-  for (const tag of dangerousTags) {
-    const tagPattern = new RegExp(`<\\s*${tag}[\\s>][^>]*>`, "gi")
-    sanitized = sanitized.replace(tagPattern, "")
-    const closeTagPattern = new RegExp(`</\\s*${tag}\\s*>`, "gi")
-    sanitized = sanitized.replace(closeTagPattern, "")
-  }
-
-  // 4. 移除 JavaScript 协议链接
-  sanitized = sanitized.replace(/href\s*=\s*["']?\s*javascript:[^"'>\s]*/gi, 'href=""')
-
-  // 5. 移除 data: 协议图片（可选，data: 可能用于内联图片）
-  // sanitized = sanitized.replace(/src\s*=\s*["']?\s*data:/gi, 'src=""')
-
-  return sanitized
+  sanitizeNode(body)
+  return body.innerHTML
 }
 
 /**
