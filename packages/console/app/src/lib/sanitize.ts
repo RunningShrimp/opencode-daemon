@@ -44,11 +44,17 @@ const ALLOWED_PROTOCOLS = ["http:", "https:", "mailto:", "tel:"]
 /**
  * 验证 URL 是否安全
  * @param url 要验证的 URL
+ * @param baseUrl 可选的基础 URL，用于解析相对路径（在 SSR 环境中使用）
  * @returns 安全返回 true，否则返回 false
  */
-export function isSafeUrl(url: string): boolean {
+export function isSafeUrl(url: string, baseUrl?: string): boolean {
   try {
-    const parsed = new URL(url, window.location.origin)
+    const base =
+      baseUrl ??
+      (typeof window !== "undefined" && window.location && window.location.origin
+        ? window.location.origin
+        : "http://localhost")
+    const parsed = new URL(url, base)
     return ALLOWED_PROTOCOLS.includes(parsed.protocol)
   } catch {
     // 如果无法解析为 URL，检查是否是不带协议的相对路径
