@@ -11,6 +11,7 @@ interface InMemoryVectorRecord {
   id: string
   project_id: string
   project_path: string
+  file_path: string
   content: string
   embedding: number[]
   time_created: number
@@ -72,7 +73,7 @@ class PerProjectMemoryStore {
       return {
         id: r.id,
         sessionId: r.project_id,
-        path: r.project_path,
+        path: r.file_path,
         content: r.content,
         score: similarity,
       }
@@ -155,6 +156,7 @@ export class VectorStoreBackgroundService implements IBackgroundService {
     id: string,
     projectId: string,
     projectPath: string,
+    filePath: string,
     content: string,
     embedding: number[],
   ): Promise<void> {
@@ -164,6 +166,7 @@ export class VectorStoreBackgroundService implements IBackgroundService {
       id,
       project_id: projectId,
       project_path: projectPath,
+      file_path: filePath,
       content,
       embedding,
       time_created: now,
@@ -174,7 +177,7 @@ export class VectorStoreBackgroundService implements IBackgroundService {
     const entry: VectorEntry = {
       id,
       sessionId: projectId,
-      path: projectPath,
+      path: filePath,
       content,
       embedding,
       timestamp: now,

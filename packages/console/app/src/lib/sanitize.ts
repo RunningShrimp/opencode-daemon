@@ -44,11 +44,17 @@ const ALLOWED_PROTOCOLS = ["http:", "https:", "mailto:", "tel:"]
 /**
  * 验证 URL 是否安全
  * @param url 要验证的 URL
+ * @param baseUrl 可选的基础 URL，用于解析相对路径（在 SSR 环境中使用）
  * @returns 安全返回 true，否则返回 false
  */
-export function isSafeUrl(url: string): boolean {
+export function isSafeUrl(url: string, baseUrl?: string): boolean {
   try {
-    const parsed = new URL(url, window.location.origin)
+    const base =
+      baseUrl ??
+      (typeof window !== "undefined" && window.location?.origin
+        ? window.location.origin
+        : "http://localhost")
+    const parsed = new URL(url, base)
     return ALLOWED_PROTOCOLS.includes(parsed.protocol)
   } catch {
     // 如果无法解析为 URL，检查是否是不带协议的相对路径
@@ -56,46 +62,55 @@ export function isSafeUrl(url: string): boolean {
   }
 }
 
+const ALLOWED_TAGS = new Set([
+  "A", "B", "I", "EM", "STRONG", "U", "S", "SPAN", "P", "BR", "DIV",
+  "UL", "OL", "LI", "PRE", "CODE", "BLOCKQUOTE",
+  "H1", "H2", "H3", "H4", "H5", "H6",
+])
+
+const ALLOWED_ATTRS = new Set(["href", "src", "alt", "title", "class", "id", "rel", "target"])
+
+const sanitizeNode = (node: Node): void => {
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    const el = node as HTMLElement
+    if (!ALLOWED_TAGS.has(el.tagName)) {
+      const parent = el.parentNode
+      if (parent) {
+        while (el.firstChild) parent.insertBefore(el.firstChild, el)
+        parent.removeChild(el)
+      }
+      return
+    }
+    for (let i = el.attributes.length - 1; i >= 0; i--) {
+      const attr = el.attributes[i]
+      const name = attr.name.toLowerCase()
+      if (name.startsWith("on") || !ALLOWED_ATTRS.has(name)) {
+        el.removeAttribute(attr.name)
+      } else if ((name === "href" || name === "src") && !isSafeUrl(attr.value)) {
+        el.removeAttribute(attr.name)
+      }
+    }
+  }
+  let child = node.firstChild
+  while (child) {
+    const next = child.nextSibling
+    sanitizeNode(child)
+    child = next
+  }
+}
+
 /**
  * 净化 HTML 内容
- * 移除危险的标签和属性，保留基本格式
+ * 使用白名单策略移除危险的标签和属性，保留基本格式
  * @param html 要净化的 HTML 字符串
  * @returns 净化后的 HTML 字符串
  */
 export function sanitizeHtml(html: string | undefined | null): string {
   if (html === undefined || html === null) return ""
-
-  // 1. 转义 HTML 实体（基本防护）
-  let sanitized = escapeHtml(html)
-
-  // 2. 移除危险的事件处理器属性
-  const dangerousAttrs = [
-    /on\w+\s*=/gi, // onClick, onMouseOver, etc.
-    /javascript:/gi,
-    /data:/gi,
-    /vbscript:/gi,
-  ]
-
-  for (const pattern of dangerousAttrs) {
-    sanitized = sanitized.replace(pattern, "")
-  }
-
-  // 3. 移除危险标签
-  const dangerousTags = ["script", "iframe", "object", "embed", "form", "input", "button", "link"]
-  for (const tag of dangerousTags) {
-    const tagPattern = new RegExp(`<\\s*${tag}[\\s>][^>]*>`, "gi")
-    sanitized = sanitized.replace(tagPattern, "")
-    const closeTagPattern = new RegExp(`</\\s*${tag}\\s*>`, "gi")
-    sanitized = sanitized.replace(closeTagPattern, "")
-  }
-
-  // 4. 移除 JavaScript 协议链接
-  sanitized = sanitized.replace(/href\s*=\s*["']?\s*javascript:[^"'>\s]*/gi, 'href=""')
-
-  // 5. 移除 data: 协议图片（可选，data: 可能用于内联图片）
-  // sanitized = sanitized.replace(/src\s*=\s*["']?\s*data:/gi, 'src=""')
-
-  return sanitized
+  if (typeof window === "undefined" || typeof DOMParser === "undefined") return escapeHtml(html)
+  const doc = new DOMParser().parseFromString(html, "text/html")
+  sanitizeNode(doc.body)
+  return doc.body.innerHTML
 }
 
 /**

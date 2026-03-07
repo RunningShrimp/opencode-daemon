@@ -55,7 +55,6 @@ export const useSessionHashScroll = (input: {
   }
 
   const scrollToMessage = (message: UserMessage, behavior: ScrollBehavior = "smooth") => {
-    console.log({ message, behavior })
     if (input.currentMessageId() !== message.id) input.setActiveMessage(message)
 
     const index = messageIndex().get(message.id) ?? -1
