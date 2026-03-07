@@ -10,7 +10,8 @@ const log = Log.create({ service: "vector-store-bg" })
 interface InMemoryVectorRecord {
   id: string
   project_id: string
-  project_path: string
+  project_root: string
+  file_path: string
   content: string
   embedding: number[]
   time_created: number
@@ -20,15 +21,15 @@ class PerProjectMemoryStore {
   private projectStores: Map<string, Map<string, InMemoryVectorRecord>> = new Map()
   private maxPerProject = 50000
 
-  private getProjectStore(projectPath: string): Map<string, InMemoryVectorRecord> {
-    if (!this.projectStores.has(projectPath)) {
-      this.projectStores.set(projectPath, new Map())
+  private getProjectStore(projectRoot: string): Map<string, InMemoryVectorRecord> {
+    if (!this.projectStores.has(projectRoot)) {
+      this.projectStores.set(projectRoot, new Map())
     }
-    return this.projectStores.get(projectPath)!
+    return this.projectStores.get(projectRoot)!
   }
 
   async upsert(record: InMemoryVectorRecord): Promise<void> {
-    const store = this.getProjectStore(record.project_path)
+    const store = this.getProjectStore(record.project_root)
 
     if (store.size >= this.maxPerProject) {
       let oldestKey: string | null = null
@@ -47,11 +48,11 @@ class PerProjectMemoryStore {
   }
 
   async search(
-    projectPath: string,
+    projectRoot: string,
     queryEmbedding: number[],
     options: { limit?: number } = {},
   ): Promise<VectorSearchResult[]> {
-    const store = this.projectStores.get(projectPath)
+    const store = this.projectStores.get(projectRoot)
     if (!store) {
       return []
     }
@@ -72,7 +73,7 @@ class PerProjectMemoryStore {
       return {
         id: r.id,
         sessionId: r.project_id,
-        path: r.project_path,
+        path: r.file_path,
         content: r.content,
         score: similarity,
       }
@@ -83,11 +84,11 @@ class PerProjectMemoryStore {
     return scored.slice(0, limit)
   }
 
-  async deleteByProject(projectPath: string): Promise<number> {
-    const store = this.projectStores.get(projectPath)
+  async deleteByProject(projectRoot: string): Promise<number> {
+    const store = this.projectStores.get(projectRoot)
     if (!store) return 0
     const count = store.size
-    this.projectStores.delete(projectPath)
+    this.projectStores.delete(projectRoot)
     return count
   }
 
@@ -99,16 +100,16 @@ class PerProjectMemoryStore {
     return total
   }
 
-  getProjectSize(projectPath: string): number {
-    return this.projectStores.get(projectPath)?.size ?? 0
+  getProjectSize(projectRoot: string): number {
+    return this.projectStores.get(projectRoot)?.size ?? 0
   }
 
   clear(): void {
     this.projectStores.clear()
   }
 
-  hasProjectData(projectPath: string): boolean {
-    const store = this.projectStores.get(projectPath)
+  hasProjectData(projectRoot: string): boolean {
+    const store = this.projectStores.get(projectRoot)
     return store !== undefined && store.size > 0
   }
 }
@@ -147,14 +148,15 @@ export class VectorStoreBackgroundService implements IBackgroundService {
     return this.status === "ready" || this.status === "fallback"
   }
 
-  async hasExistingData(_projectId: string, projectPath: string): Promise<boolean> {
-    return this.memoryStore.hasProjectData(projectPath)
+  async hasExistingData(_projectId: string, projectRoot: string): Promise<boolean> {
+    return this.memoryStore.hasProjectData(projectRoot)
   }
 
   async upsert(
     id: string,
     projectId: string,
-    projectPath: string,
+    projectRoot: string,
+    filePath: string,
     content: string,
     embedding: number[],
   ): Promise<void> {
@@ -163,7 +165,8 @@ export class VectorStoreBackgroundService implements IBackgroundService {
     const record: InMemoryVectorRecord = {
       id,
       project_id: projectId,
-      project_path: projectPath,
+      project_root: projectRoot,
+      file_path: filePath,
       content,
       embedding,
       time_created: now,
@@ -174,7 +177,7 @@ export class VectorStoreBackgroundService implements IBackgroundService {
     const entry: VectorEntry = {
       id,
       sessionId: projectId,
-      path: projectPath,
+      path: filePath,
       content,
       embedding,
       timestamp: now,
@@ -185,21 +188,21 @@ export class VectorStoreBackgroundService implements IBackgroundService {
 
   async search(
     _projectId: string,
-    projectPath: string,
+    projectRoot: string,
     queryEmbedding: number[],
     options: { limit?: number; minScore?: number } = {},
   ): Promise<VectorSearchResult[]> {
-    return this.memoryStore.search(projectPath, queryEmbedding, {
+    return this.memoryStore.search(projectRoot, queryEmbedding, {
       limit: options.limit || 10,
     })
   }
 
-  async deleteByProject(_projectId: string, projectPath: string): Promise<number> {
-    return this.memoryStore.deleteByProject(projectPath)
+  async deleteByProject(_projectId: string, projectRoot: string): Promise<number> {
+    return this.memoryStore.deleteByProject(projectRoot)
   }
 
-  async getProjectDataSize(projectPath: string): Promise<number> {
-    return this.memoryStore.getProjectSize(projectPath)
+  async getProjectDataSize(projectRoot: string): Promise<number> {
+    return this.memoryStore.getProjectSize(projectRoot)
   }
 }
 
