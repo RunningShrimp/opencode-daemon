@@ -23,15 +23,61 @@ import { QualityGate } from "@/ai/workflow/quality-gate"
 import { ThoughtNodeStorage } from "@/ai/thinking/thought-storage"
 import { ThinkTreeUI } from "@/cli/cmd/tui/components/think-tree-ui"
 import { TreeOfThought } from "@/ai/thinking/tree-of-thought"
-import { LoopPhase, LoopDecision
-  SelfDrivingConfig
-  DEFAULT_SELF_DRIVING_CONFIG
-  LoopState
-} from "./self-driving-loop"
-
-import { RemainingWorkReport } from "./self-driving-loop"
 
 const log = Log.create({ service: "self-driving-loop" })
+
+export enum LoopPhase {
+  SENSING = "sensing",
+  PERCEIVING = "perceiving",
+  PLANNING = "planning",
+  ACTING = "acting",
+  REFLECTING = "reflecting",
+  LEARNING = "learning",
+  ADAPTING = "adapting",
+}
+
+export interface LoopDecision {
+  phase: LoopPhase
+  action: string
+  reasoning: string
+  confidence?: number
+  expectedOutcome?: string
+}
+
+export interface SelfDrivingConfig {
+  enableAutonomousGoalSetting: boolean
+  enableAutomaticReflection: boolean
+  maxCycles: number
+  cycleTimeout: number
+  enableKillSwitch: boolean
+}
+
+export const DEFAULT_SELF_DRIVING_CONFIG: SelfDrivingConfig = {
+  enableAutonomousGoalSetting: true,
+  enableAutomaticReflection: true,
+  maxCycles: 100,
+  cycleTimeout: 30000,
+  enableKillSwitch: true,
+}
+
+export interface LoopState {
+  phase: LoopPhase
+  stepCount: number
+  phaseDuration: number
+  currentGoal: Goal | null
+  activeHypotheses: Hypothesis[]
+  pendingDecisions: LoopDecision[]
+  context: Record<string, unknown>
+  lastReflection: number
+  consecutiveSamePhase: number
+}
+
+export interface RemainingWorkReport {
+  hasRemaining: boolean
+  items: string[]
+  progress: number
+  suggestedActions: string[]
+}
 
 export class SelfDrivingLoop {
   private monitor: SelfMonitor
