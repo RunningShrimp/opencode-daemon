@@ -1672,7 +1672,7 @@ describe("ProviderTransform.variants", () => {
     expect(result).toEqual({})
   })
 
-  test("deepseek returns empty object", () => {
+  test("deepseek returns variants when reasoning is enabled", () => {
     const model = createMockModel({
       id: "deepseek/deepseek-chat",
       providerID: "deepseek",
@@ -1683,10 +1683,12 @@ describe("ProviderTransform.variants", () => {
       },
     })
     const result = ProviderTransform.variants(model)
-    expect(result).toEqual({})
+    expect(result).toHaveProperty("low")
+    expect(result).toHaveProperty("medium")
+    expect(result).toHaveProperty("high")
   })
 
-  test("minimax returns empty object", () => {
+  test("minimax returns variants when reasoning is enabled", () => {
     const model = createMockModel({
       id: "minimax/minimax-model",
       providerID: "minimax",
@@ -1697,10 +1699,12 @@ describe("ProviderTransform.variants", () => {
       },
     })
     const result = ProviderTransform.variants(model)
-    expect(result).toEqual({})
+    expect(result).toHaveProperty("low")
+    expect(result).toHaveProperty("medium")
+    expect(result).toHaveProperty("high")
   })
 
-  test("glm returns empty object", () => {
+  test("glm returns variants when reasoning is enabled", () => {
     const model = createMockModel({
       id: "glm/glm-4",
       providerID: "glm",
@@ -1711,7 +1715,9 @@ describe("ProviderTransform.variants", () => {
       },
     })
     const result = ProviderTransform.variants(model)
-    expect(result).toEqual({})
+    expect(result).toHaveProperty("low")
+    expect(result).toHaveProperty("medium")
+    expect(result).toHaveProperty("high")
   })
 
   test("mistral returns empty object", () => {

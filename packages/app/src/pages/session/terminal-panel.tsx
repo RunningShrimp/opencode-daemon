@@ -102,7 +102,7 @@ export function TerminalPanel() {
 
   const all = createMemo(() => terminal.all())
   const ids = createMemo(() => all().map((pty) => pty.id))
-  const byId = createMemo(() => new Map(all().map((pty) => [pty.id, { ...pty }])))
+  const byId = createMemo(() => new Map(all().map((pty) => [pty.id, pty])))
 
   const handleTerminalDragStart = (event: unknown) => {
     const id = getDraggableId(event)
@@ -191,8 +191,8 @@ export function TerminalPanel() {
                   <SortableProvider ids={ids()}>
                     <For each={ids()}>
                       {(id) => (
-                        <Show when={byId().get(id)} keyed>
-                          {(pty) => <SortableTerminalTab terminal={pty} onClose={close} />}
+                        <Show when={byId().get(id)}>
+                          {(pty) => <SortableTerminalTab terminal={pty()} onClose={close} />}
                         </Show>
                       )}
                     </For>

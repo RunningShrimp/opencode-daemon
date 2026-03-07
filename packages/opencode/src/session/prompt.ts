@@ -62,29 +62,39 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
 
-  const state = Instance.state(
-    () => {
-      const data: Record<
-        string,
-        {
-          abort: AbortController
-          callbacks: {
-            resolve(input: MessageV2.WithParts): void
-            reject(reason?: any): void
-          }[]
-        }
-      > = {}
-      return data
-    },
-    async (current) => {
-      for (const item of Object.values(current)) {
-        item.abort.abort()
-      }
-    },
-  )
+  let stateCache: ReturnType<typeof Instance.state> | null = null
+
+  const getState = () => {
+    if (!stateCache) {
+      stateCache = Instance.state(
+        () => {
+          const data: Record<
+            string,
+            {
+              abort: AbortController
+              callbacks: {
+                resolve(input: MessageV2.WithParts): void
+                reject(reason?: any): void
+              }[]
+            }
+          > = {}
+          return data
+        },
+        async (current) => {
+          for (const item of Object.values(current)) {
+            item.abort.abort()
+          }
+        },
+      )()
+    }
+    return stateCache!
+  }
+
+  // Alias for backward compatibility
+  const state = getState
 
   export function assertNotBusy(sessionID: string) {
-    const match = state()[sessionID]
+    const match = getState()[sessionID]
     if (match) throw new Session.BusyError(sessionID)
   }
 
@@ -236,7 +246,7 @@ export namespace SessionPrompt {
   }
 
   function start(sessionID: string) {
-    const s = state()
+    const s = getState()
     if (s[sessionID]) return
     const controller = new AbortController()
     s[sessionID] = {
@@ -247,7 +257,7 @@ export namespace SessionPrompt {
   }
 
   function resume(sessionID: string) {
-    const s = state()
+    const s = getState()
     if (!s[sessionID]) return
 
     return s[sessionID].abort.signal
@@ -277,7 +287,7 @@ export namespace SessionPrompt {
     const abort = resume_existing ? resume(sessionID) : start(sessionID)
     if (!abort) {
       return new Promise<MessageV2.WithParts>((resolve, reject) => {
-        const callbacks = state()[sessionID].callbacks
+        const callbacks = getState()[sessionID].callbacks
         callbacks.push({ resolve, reject })
       })
     }
@@ -716,7 +726,7 @@ export namespace SessionPrompt {
     SessionCompaction.prune({ sessionID })
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user") continue
-      const queued = state()[sessionID]?.callbacks ?? []
+      const queued = getState()[sessionID]?.callbacks ?? []
       for (const q of queued) {
         q.resolve(item)
       }
@@ -1480,7 +1490,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     using _ = defer(() => {
       // If no queued callbacks, cancel (the default)
-      const callbacks = state()[input.sessionID]?.callbacks ?? []
+      const callbacks = getState()[input.sessionID]?.callbacks ?? []
       if (callbacks.length === 0) {
         cancel(input.sessionID)
       } else {

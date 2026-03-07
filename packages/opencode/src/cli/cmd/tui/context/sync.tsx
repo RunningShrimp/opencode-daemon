@@ -25,7 +25,7 @@ import { createSimpleContext } from "./helper"
 import type { Snapshot } from "@/snapshot"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
-import { batch, onMount } from "solid-js"
+import { batch, onMount, onCleanup } from "solid-js"
 import { Log } from "@/util/log"
 import type { Path } from "@opencode-ai/sdk"
 
@@ -104,7 +104,11 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
     const sdk = useSDK()
 
-    sdk.event.listen((e) => {
+    // 保存事件监听器的取消订阅函数
+    let unlisten: (() => void) | undefined
+
+    // 注册事件监听器
+    unlisten = sdk.event.listen((e) => {
       const event = e.details
       switch (event.type) {
         case "server.instance.disposed":
@@ -194,7 +198,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
 
         case "session.deleted": {
-          const result = Binary.search(store.session, event.properties.info.id, (s) => s.id)
+          const sessionID = event.properties.info.id
+          const result = Binary.search(store.session, sessionID, (s) => s.id)
           if (result.found) {
             setStore(
               "session",
@@ -203,6 +208,19 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
               }),
             )
           }
+          // 清理该 session 的所有关联数据，防止内存泄漏
+          batch(() => {
+            const messages = store.message[sessionID] ?? []
+            for (const msg of messages) {
+              setStore("part", produce((draft) => { delete draft[msg.id] }))
+            }
+            setStore("message", produce((draft) => { delete draft[sessionID] }))
+            setStore("todo", produce((draft) => { delete draft[sessionID] }))
+            setStore("session_diff", produce((draft) => { delete draft[sessionID] }))
+            setStore("permission", produce((draft) => { delete draft[sessionID] }))
+            setStore("question", produce((draft) => { delete draft[sessionID] }))
+            setStore("session_status", produce((draft) => { delete draft[sessionID] }))
+          })
           break
         }
         case "session.updated": {
@@ -300,10 +318,29 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         }
 
         case "message.part.delta": {
-          const parts = store.part[event.properties.messageID]
-          if (!parts) break
+          let parts = store.part[event.properties.messageID]
+          if (!parts) {
+            setStore("part", event.properties.messageID, [])
+            parts = []
+          }
           const result = Binary.search(parts, event.properties.partID, (p) => p.id)
-          if (!result.found) break
+          if (!result.found) {
+            setStore(
+              "part",
+              event.properties.messageID,
+              produce((draft) => {
+                const placeholder: Part = {
+                  id: event.properties.partID,
+                  messageID: event.properties.messageID,
+                  sessionID: event.properties.sessionID,
+                  type: "text",
+                  text: event.properties.delta,
+                }
+                draft.splice(result.index, 0, placeholder)
+              }),
+            )
+            break
+          }
           setStore(
             "part",
             event.properties.messageID,
@@ -340,6 +377,13 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           setStore("vcs", { branch: event.properties.branch })
           break
         }
+      }
+    })
+
+    // 组件卸载时清理事件监听器
+    onCleanup(() => {
+      if (unlisten) {
+        unlisten()
       }
     })
 

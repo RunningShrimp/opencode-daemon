@@ -10,9 +10,8 @@ import {
   ParentProps,
   Show,
   untrack,
-  type JSX,
 } from "solid-js"
-import { A, useNavigate, useParams } from "@solidjs/router"
+import { useNavigate, useParams } from "@solidjs/router"
 import { useLayout, LocalProject } from "@/context/layout"
 import { useGlobalSync } from "@/context/global-sync"
 import { Persist, persisted } from "@/utils/persist"
@@ -20,7 +19,6 @@ import { base64Encode } from "@opencode-ai/util/encode"
 import { decode64 } from "@/utils/base64"
 import { ResizeHandle } from "@opencode-ai/ui/resize-handle"
 import { Button } from "@opencode-ai/ui/button"
-import { Icon } from "@opencode-ai/ui/icon"
 import { IconButton } from "@opencode-ai/ui/icon-button"
 import { Tooltip } from "@opencode-ai/ui/tooltip"
 import { DropdownMenu } from "@opencode-ai/ui/dropdown-menu"
@@ -59,7 +57,6 @@ import { Titlebar } from "@/components/titlebar"
 import { useServer } from "@/context/server"
 import { useLanguage, type Locale } from "@/context/language"
 import {
-  childMapByParent,
   displayName,
   effectiveWorkspaceOrder,
   errorMessage,
@@ -1941,7 +1938,7 @@ export default function Layout(props: ParentProps) {
                           size="large"
                           icon="plus-small"
                           class="w-full"
-                          onClick={() => navigateWithSidebarReset(`/${base64Encode(p.worktree)}/session`)}
+                          onClick={() => navigateWithSidebarReset(`/${base64Encode(p().worktree)}/session`)}
                         >
                           {language.t("command.session.new")}
                         </Button>
@@ -1959,7 +1956,7 @@ export default function Layout(props: ParentProps) {
                 >
                   <>
                     <div class="shrink-0 py-4 px-3">
-                      <Button size="large" icon="plus-small" class="w-full" onClick={() => createWorkspace(p)}>
+                      <Button size="large" icon="plus-small" class="w-full" onClick={() => createWorkspace(p())}>
                         {language.t("workspace.new")}
                       </Button>
                     </div>
@@ -2096,11 +2093,9 @@ export default function Layout(props: ParentProps) {
             />
           </div>
           <Show when={!layout.sidebar.opened() ? hoverProjectData()?.worktree : undefined} keyed>
-            {(worktree) => (
-              <div class="absolute inset-y-0 left-16 z-50 flex" onMouseEnter={aim.reset}>
-                <SidebarPanel project={hoverProjectData()} />
-              </div>
-            )}
+            <div class="absolute inset-y-0 left-16 z-50 flex" onMouseEnter={aim.reset}>
+              <SidebarPanel project={hoverProjectData()} />
+            </div>
           </Show>
           <Show when={layout.sidebar.opened()}>
             <ResizeHandle
