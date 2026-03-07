@@ -1,4 +1,4 @@
-import { createMemo } from "solid-js"
+import { createMemo, onCleanup } from "solid-js"
 import { Keybind } from "@/util/keybind"
 import { pipe, mapValues } from "remeda"
 import type { TuiConfig } from "@/config/tui"
@@ -97,6 +97,12 @@ export const { use: useKeybind, provider: KeybindProvider } = createSimpleContex
         return result.replace("<leader>", Keybind.toString(keybinds().leader![0]!))
       },
     }
+
+    // 组件卸载时清理 timeout，防止内存泄漏
+    onCleanup(() => {
+      if (timeout) clearTimeout(timeout)
+    })
+
     return result
   },
 })

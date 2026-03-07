@@ -198,7 +198,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           break
 
         case "session.deleted": {
-          const result = Binary.search(store.session, event.properties.info.id, (s) => s.id)
+          const sessionID = event.properties.info.id
+          const result = Binary.search(store.session, sessionID, (s) => s.id)
           if (result.found) {
             setStore(
               "session",
@@ -207,6 +208,19 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
               }),
             )
           }
+          // 清理该 session 的所有关联数据，防止内存泄漏
+          batch(() => {
+            const messages = store.message[sessionID] ?? []
+            for (const msg of messages) {
+              setStore("part", produce((draft) => { delete draft[msg.id] }))
+            }
+            setStore("message", produce((draft) => { delete draft[sessionID] }))
+            setStore("todo", produce((draft) => { delete draft[sessionID] }))
+            setStore("session_diff", produce((draft) => { delete draft[sessionID] }))
+            setStore("permission", produce((draft) => { delete draft[sessionID] }))
+            setStore("question", produce((draft) => { delete draft[sessionID] }))
+            setStore("session_status", produce((draft) => { delete draft[sessionID] }))
+          })
           break
         }
         case "session.updated": {
