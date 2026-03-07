@@ -161,7 +161,7 @@ const SENSITIVE_ENV_PATTERNS = [
 export function sanitizeEnvironment(env: Record<string, string | undefined>): Record<string, string | undefined> {
   const sanitized: Record<string, string | undefined> = {}
 
-  for (const [key, of Object.entries(env)) {
+  for (const [key, value] of Object.entries(env)) {
     const upper = key.toUpperCase()
     const isSensitive = SENSITIVE_ENV_PATTERNS.some(p => upper.includes(p))
 
