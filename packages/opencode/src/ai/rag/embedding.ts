@@ -1,12 +1,25 @@
-const createHash = (input: string): number[] => {
-  const hash: number[] = new Array(384).fill(0)
-  for (let i = 0; i < input.length; i++) {
-    const char = input.charCodeAt(i)
-    for (let j = 0; j < 384; j++) {
-      hash[j] = (hash[j] * 31 + char) % 384
-    }
+const mulberry32 = (seed: number) => {
+  let t = seed >>> 0
+  return () => {
+    t += 0x6d2b79f5
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
-  return hash
+}
+
+const hash = (input: string): number => {
+  let hash = 2166136261 >>> 0
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i)
+    hash = Math.imul(hash, 16777619) >>> 0
+  }
+  return hash >>> 0
+}
+
+const embed = (input: string): number[] => {
+  const rand = mulberry32(hash(input))
+  return Array.from({ length: 384 }, () => rand())
 }
 
 const MAX_CACHE_SIZE = 10000
@@ -33,7 +46,7 @@ export class EmbeddingService {
       return cached.embedding
     }
 
-    const embedding = createHash(text)
+    const embedding = embed(text)
     this.cache.set(text, {
       embedding,
       timestamp: Date.now(),
