@@ -28,7 +28,7 @@ const log = Log.create({ service: "mutex" })
 export class Mutex {
   private locked = false
   private waitQueue: Array<{
-    resolve: () => void
+    resolve: (value?: any) => void
     reject: (error: Error) => void
   }> = []
   private _forceReleased = false

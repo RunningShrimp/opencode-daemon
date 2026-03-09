@@ -52,7 +52,7 @@ describe("Integration: Self-Driving + Self-Review + Think-Tree", () => {
     await selfDrivingLoop.initialize("Test task", {
       type: "implementation",
       description: "Test",
-      keywords: [],
+      complexity: "simple",
     })
 
     const report = selfDrivingLoop.detectRemainingWork()
@@ -111,7 +111,7 @@ describe("Integration: Self-Driving + Self-Review + Think-Tree", () => {
     await selfDrivingLoop.initialize("Complete integration test", {
       type: "implementation",
       description: "Test all phases",
-      keywords: [],
+      complexity: "moderate",
     })
 
     treeOfThought.initialize()

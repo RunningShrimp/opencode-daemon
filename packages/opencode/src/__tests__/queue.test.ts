@@ -181,7 +181,7 @@ describe("AsyncQueue", () => {
 
       // Create iterator
       const iterator = queue[Symbol.asyncIterator]()
-      
+
       results.push((await iterator.next()).value!)
       results.push((await iterator.next()).value!)
       results.push((await iterator.next()).value!)
@@ -269,17 +269,13 @@ describe("WorkPool", () => {
       let activeCount = 0
       let maxActive = 0
 
-      const results = await WorkPool.processWithLimit(
-        [1, 2, 3, 4, 5, 6],
-        3,
-        async (item) => {
-          activeCount++
-          maxActive = Math.max(maxActive, activeCount)
-          await new Promise((r) => setTimeout(r, 10))
-          activeCount--
-          return item
-        }
-      )
+      const results = await WorkPool.processWithLimit(3, [1, 2, 3, 4, 5, 6], async (item) => {
+        activeCount++
+        maxActive = Math.max(maxActive, activeCount)
+        await new Promise((r) => setTimeout(r, 10))
+        activeCount--
+        return item
+      })
 
       expect(maxActive).toBe(3)
       expect(results.sort()).toEqual([1, 2, 3, 4, 5, 6])
@@ -292,17 +288,13 @@ describe("work function", () => {
     let running = 0
     let maxRunning = 0
 
-    const results = await work(
-      3,
-      [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-      async (item) => {
-        running++
-        maxRunning = Math.max(maxRunning, running)
-        await new Promise((r) => setTimeout(r, 5))
-        running--
-        return item * 2
-      }
-    )
+    const results = await work(3, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], async (item) => {
+      running++
+      maxRunning = Math.max(maxRunning, running)
+      await new Promise((r) => setTimeout(r, 5))
+      running--
+      return item * 2
+    })
 
     expect(maxRunning).toBe(3)
     expect(results.sort()).toEqual([2, 4, 6, 8, 10, 12, 14, 16, 18, 20])
@@ -321,7 +313,7 @@ describe("work function", () => {
 
 describe("boundedWork function", () => {
   test("works like work function", async () => {
-    const results = await boundedWork([1, 2, 3], 2, async (item) => item * 2)
+    const results = await boundedWork(2, [1, 2, 3], async (item) => item * 2)
     expect(results.sort()).toEqual([2, 4, 6])
   })
 })

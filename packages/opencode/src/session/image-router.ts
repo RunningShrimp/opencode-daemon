@@ -113,7 +113,7 @@ export class ImageRouter {
     }
 
     const cfg = await Config.get()
-    const imageConfig = cfg.imageUnderstanding
+    const imageConfig = (cfg as any).imageUnderstanding
 
     this.config = {
       enabled: imageConfig?.enabled ?? true,
@@ -222,11 +222,7 @@ export class ImageRouter {
    * @param prompt - User prompt about the image
    * @returns Interpretation result
    */
-  async execute(
-    strategy: ImageStrategy,
-    features: ImageFeature[],
-    prompt: string,
-  ): Promise<ImageInterpretationResult> {
+  async execute(strategy: ImageStrategy, features: ImageFeature[], prompt: string): Promise<ImageInterpretationResult> {
     const startTime = Date.now()
     let text = ""
     let isFallback = false
@@ -402,7 +398,7 @@ export class ImageRouter {
       const { generateText } = await import("ai")
 
       const result = await generateText({
-        model,
+        model: model as any,
         messages: [
           {
             role: "user",
@@ -416,7 +412,7 @@ export class ImageRouter {
           },
         ],
         maxSteps: config.modelTimeout / 1000,
-      })
+      } as any)
 
       // Return the text result
       return result.text
@@ -523,8 +519,8 @@ export function getImageRouter(): ImageRouter {
 /**
  * Convenience function to process images in message parts
  * @param parts - Message parts
-   * @param prompt - User prompt
-   * @param context - Routing context
+ * @param prompt - User prompt
+ * @param context - Routing context
  * @returns Interpretation result or null
  */
 export async function processImages(

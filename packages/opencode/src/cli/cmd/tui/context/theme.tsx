@@ -324,7 +324,8 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
 
       Promise.race([renderer.getPalette({ size: 16 }), timeoutPromise])
         .then((colors) => {
-          if (!colors.palette[0]) {
+          const palette = (colors as { palette: unknown[] }).palette
+          if (!palette[0]) {
             if (store.active === "system") {
               setStore(
                 produce((draft) => {
@@ -337,7 +338,10 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
           }
           setStore(
             produce((draft) => {
-              draft.themes.system = generateSystem(colors, store.mode)
+              draft.themes.system = generateSystem(
+                colors as unknown as Parameters<typeof generateSystem>[0],
+                store.mode,
+              )
               if (store.active === "system") {
                 draft.ready = true
               }

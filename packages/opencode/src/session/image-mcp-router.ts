@@ -1,10 +1,5 @@
 import { Log } from "@/util/log"
-import {
-  MCPSmartRouter,
-  getGlobalMCPRouter,
-  type MCPToolCapability,
-  type RoutingDecision,
-} from "@/util/smart-router"
+import { MCPSmartRouter, getGlobalMCPRouter, type MCPToolCapability, type RoutingDecision } from "@/util/smart-router"
 import { MCP } from "@/mcp"
 import type { ImageFeature } from "./image-analyzer"
 
@@ -80,7 +75,7 @@ export class ImageMCPRouter {
         if (isImageTool) {
           const mcptoolCapability: MCPToolCapability = {
             toolId,
-            name: tool.name || toolId,
+            name: toolId,
             description: tool.description || "",
             serverName: this.extractServerName(toolId),
             serverType: "remote", // Assume remote for now
@@ -94,7 +89,7 @@ export class ImageMCPRouter {
           }
 
           this.router.registerTool(mcptoolCapability)
-          log.debug("registered image tool", { toolId, name: tool.name })
+          log.debug("registered image tool", { toolId, name: toolId })
         }
       }
     } catch (error) {

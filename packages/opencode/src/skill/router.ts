@@ -14,7 +14,7 @@ import { Flag } from "@/flag/flag"
 import { Bus } from "@/bus"
 import { Session } from "@/session"
 import { Glob } from "../util/glob"
-import pLimit from "p-limit"
+import { ConcurrencyLimiter } from "../util/concurrency-limiter"
 
 export namespace Skill {
   const log = Log.create({ service: "skill" })
@@ -184,7 +184,7 @@ export namespace Skill {
     }
 
     private async loadAll(signal?: AbortSignal): Promise<SkillInfo[]> {
-      const limit = pLimit(this.config.concurrency)
+      const limiter = new ConcurrencyLimiter(this.config.concurrency)
       const controller = new AbortController()
 
       if (signal) {
@@ -194,10 +194,7 @@ export namespace Skill {
       const scanProvider = async (provider: SkillProvider): Promise<SkillInfo[]> => {
         try {
           const timeoutPromise = new Promise<SkillInfo[]>((_, reject) => {
-            setTimeout(
-              () => reject(new Error(`Provider ${provider.name} timeout`)),
-              this.config.timeout,
-            )
+            setTimeout(() => reject(new Error(`Provider ${provider.name} timeout`)), this.config.timeout)
           })
           const result = await Promise.race([provider.scan(controller.signal), timeoutPromise])
           return result.map((s) => ({ ...s, provider: provider.name }))
@@ -207,9 +204,7 @@ export namespace Skill {
         }
       }
 
-      const results = await Promise.all(
-        this.providers.map((provider) => limit(() => scanProvider(provider))),
-      )
+      const results = await Promise.all(this.providers.map((provider) => limiter.run(() => scanProvider(provider))))
 
       const skillsMap = new Map<string, SkillInfo>()
 
@@ -270,7 +265,7 @@ export namespace Skill {
 
     async scan(signal?: AbortSignal): Promise<SkillInfo[]> {
       const results: SkillInfo[] = []
-      const limit = pLimit(5)
+      const limiter = new ConcurrencyLimiter(5)
 
       const scanDir = async (root: string) => {
         if (!(await Filesystem.isDir(root))) return
@@ -283,14 +278,13 @@ export namespace Skill {
           symlink: true,
         })
 
-        // 使用 limit 包装处理每个 match
         const processMatch = async (match: string) => {
           if (signal?.aborted) return
           const skill = await this.parseSkill(match)
           if (skill) results.push(skill)
         }
 
-        await Promise.all(matches.map((match) => limit(() => processMatch(match))))
+        await Promise.all(matches.map((match) => limiter.run(() => processMatch(match))))
       }
 
       await Promise.all(this.roots.map(scanDir))
@@ -309,9 +303,7 @@ export namespace Skill {
 
       if (!md) return
 
-      const parsed = z
-        .object({ name: z.string(), description: z.string() })
-        .safeParse(md.data)
+      const parsed = z.object({ name: z.string(), description: z.string() }).safeParse(md.data)
 
       if (!parsed.success) {
         log.warn("skill parse failed", { skill: match, issues: parsed.error.issues })
@@ -365,9 +357,7 @@ export namespace Skill {
 
       if (!md) return
 
-      const parsed = z
-        .object({ name: z.string(), description: z.string() })
-        .safeParse(md.data)
+      const parsed = z.object({ name: z.string(), description: z.string() }).safeParse(md.data)
 
       if (!parsed.success) {
         log.warn("skill parse failed", { skill: match, issues: parsed.error.issues })
@@ -396,13 +386,9 @@ export namespace Skill {
       for (const skillPath of this.paths) {
         if (signal?.aborted) break
 
-        const expanded = skillPath.startsWith("~/")
-          ? path.join(os.homedir(), skillPath.slice(2))
-          : skillPath
+        const expanded = skillPath.startsWith("~/") ? path.join(os.homedir(), skillPath.slice(2)) : skillPath
 
-        const resolved = path.isAbsolute(expanded)
-          ? expanded
-          : path.join(Instance.directory, expanded)
+        const resolved = path.isAbsolute(expanded) ? expanded : path.join(Instance.directory, expanded)
 
         if (!(await Filesystem.isDir(resolved))) {
           log.warn("skill path not found", { path: resolved })
@@ -434,9 +420,7 @@ export namespace Skill {
 
       if (!md) return
 
-      const parsed = z
-        .object({ name: z.string(), description: z.string() })
-        .safeParse(md.data)
+      const parsed = z.object({ name: z.string(), description: z.string() }).safeParse(md.data)
 
       if (!parsed.success) {
         log.warn("skill parse failed", { skill: match, issues: parsed.error.issues })
@@ -464,7 +448,7 @@ export namespace Skill {
 
     async scan(signal?: AbortSignal): Promise<SkillInfo[]> {
       const results: SkillInfo[] = []
-      const limit = pLimit(3)
+      const limiter = new ConcurrencyLimiter(3)
 
       const fetchAndProcessUrl = async (url: string) => {
         if (signal?.aborted) return
@@ -492,7 +476,7 @@ export namespace Skill {
         }
       }
 
-      await Promise.all(this.urls.map((url) => limit(() => fetchAndProcessUrl(url))))
+      await Promise.all(this.urls.map((url) => limiter.run(() => fetchAndProcessUrl(url))))
       return results
     }
 
@@ -525,7 +509,7 @@ export namespace Skill {
         (skill: { name?: string; files?: unknown[] }) => skill?.name && Array.isArray(skill.files),
       )
 
-      const limit = pLimit(3)
+      const limiter = new ConcurrencyLimiter(3)
 
       const processSkill = async (skill: { name: string; files: string[] }) => {
         if (signal?.aborted) return
@@ -550,7 +534,7 @@ export namespace Skill {
         }
       }
 
-      await Promise.all(list.map((skill: { name: string; files: string[] }) => limit(() => processSkill(skill))))
+      await Promise.all(list.map((skill: { name: string; files: string[] }) => limiter.run(() => processSkill(skill))))
 
       return result
     }
@@ -581,9 +565,7 @@ export namespace Skill {
 
       if (!md) return
 
-      const parsed = z
-        .object({ name: z.string(), description: z.string() })
-        .safeParse(md.data)
+      const parsed = z.object({ name: z.string(), description: z.string() }).safeParse(md.data)
 
       if (!parsed.success) {
         log.warn("skill parse failed", { skill: match, issues: parsed.error.issues })

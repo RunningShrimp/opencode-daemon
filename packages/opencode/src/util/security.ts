@@ -20,7 +20,7 @@ interface RateLimitEntry {
 
 const rateLimiters = new Map<string, RateLimitEntry>()
 
-export function checkRateLimit(key: string, config: RateLimitConfig = {}): boolean {
+export function checkRateLimit(key: string, config: Partial<RateLimitConfig> = {}): boolean {
   const cfg = { maxOperations: 100, windowMs: 60000, ...config }
   const now = Date.now()
   const entry = rateLimiters.get(key)
@@ -163,7 +163,7 @@ export function sanitizeEnvironment(env: Record<string, string | undefined>): Re
 
   for (const [key, value] of Object.entries(env)) {
     const upper = key.toUpperCase()
-    const isSensitive = SENSITIVE_ENV_PATTERNS.some(p => upper.includes(p))
+    const isSensitive = SENSITIVE_ENV_PATTERNS.some((p) => p.test(upper))
 
     if (isSensitive) {
       log.info("removing sensitive env var from command environment", { key })
@@ -191,13 +191,13 @@ export const SecurityAuditEvent = BusEvent.define(
     sessionID: z.string().optional(),
     projectID: z.string().optional(),
     details: z.record(z.string(), z.any()),
-  })
+  }),
 )
 
 export function auditLog(
-  type: z.infer<typeof SecurityAuditEvent>["payload"]["type"],
+  type: string,
   details: Record<string, any>,
-  context?: { sessionID?: string; projectID?: string }
+  context?: { sessionID?: string; projectID?: string },
 ): void {
   const event = {
     timestamp: Date.now(),
@@ -208,12 +208,12 @@ export function auditLog(
   }
 
   log.info("security audit", event)
-  Bus.publish(SecurityAuditEvent, event)
+  Bus.publish(SecurityAuditEvent, event as any)
 }
 
 export async function isPathEscape(
   targetPath: string,
-  projectDir: string
+  projectDir: string,
 ): Promise<{ escaped: boolean; reason?: string; realPath?: string }> {
   try {
     const realTarget = await fs.promises.realpath(targetPath).catch(() => null)
@@ -226,10 +226,7 @@ export async function isPathEscape(
     const normalizedTarget = path.normalize(realTarget)
     const normalizedProject = path.normalize(realProject)
 
-    if (
-      !normalizedTarget.startsWith(normalizedProject + path.sep) &&
-      normalizedTarget !== normalizedProject
-    ) {
+    if (!normalizedTarget.startsWith(normalizedProject + path.sep) && normalizedTarget !== normalizedProject) {
       log.warn("path escape detected", { targetPath, realTarget, projectDir, realProject })
       return {
         escaped: true,
@@ -247,7 +244,7 @@ export async function isPathEscape(
 
 export async function detectSuspiciousSymlink(
   filePath: string,
-  projectDir: string
+  projectDir: string,
 ): Promise<{ suspicious: boolean; reason?: string }> {
   try {
     const stat = await fs.promises.lstat(filePath)

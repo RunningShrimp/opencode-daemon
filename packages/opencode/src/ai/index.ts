@@ -11,7 +11,6 @@ export * from "./thinking"
 export * from "./rag"
 export * from "./tools"
 
-export { SelfDrivenAgent, createSelfDrivenAgent, type SelfDrivenAgentConfig } from "./thinking/self-driven-agent"
 export { VectorStore, vectorStore } from "./rag/vector-store"
 export { HybridRetriever } from "./rag/hybrid-retriever"
 export { EmbeddingService } from "./rag/embedding"

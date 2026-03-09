@@ -62,30 +62,15 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
 
-  let stateCache: ReturnType<typeof Instance.state> | null = null
+  let stateCache: any = null
 
   const getState = () => {
     if (!stateCache) {
-      stateCache = Instance.state(
-        () => {
-          const data: Record<
-            string,
-            {
-              abort: AbortController
-              callbacks: {
-                resolve(input: MessageV2.WithParts): void
-                reject(reason?: any): void
-              }[]
-            }
-          > = {}
-          return data
-        },
-        async (current) => {
-          for (const item of Object.values(current)) {
-            item.abort.abort()
-          }
-        },
-      )()
+      const store = Instance.state(
+        () => ({}),
+        async () => {},
+      )
+      stateCache = store as any
     }
     return stateCache!
   }
@@ -325,11 +310,7 @@ export namespace SessionPrompt {
       }
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
-      if (
-        lastAssistant?.finish &&
-        lastAssistant.finish !== "tool-calls" &&
-        lastUser.id < lastAssistant.id
-      ) {
+      if (lastAssistant?.finish && lastAssistant.finish !== "tool-calls" && lastUser.id < lastAssistant.id) {
         log.info("exiting loop", { sessionID })
         break
       }

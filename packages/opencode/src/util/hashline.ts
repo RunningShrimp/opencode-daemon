@@ -188,13 +188,7 @@ export class Hashline {
       }
     }
 
-    getLog().debug("hash mismatch", {
-      path,
-      expected: lineNumber,
-      expectedHash: hash,
-      actualHash,
-      candidates: candidates.length,
-    })
+    getLog().debug()
 
     return {
       valid: false,

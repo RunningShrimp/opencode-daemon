@@ -79,7 +79,8 @@ export class SessionErrorHandler {
 
     // Subscribe to session error events
     this.unsubscribe = Bus.subscribe(Session.Event.Error, (event) => {
-      this.handleError(event)
+      const e = event as unknown as { sessionID?: string; error: any }
+      this.handleError(e)
     })
 
     this.initialized = true
@@ -91,10 +92,7 @@ export class SessionErrorHandler {
   /**
    * Handle a session error event
    */
-  private handleError(event: {
-    sessionID?: string
-    error: any
-  }): void {
+  private handleError(event: { sessionID?: string; error: any }): void {
     // Create error record
     const record: ErrorRecord = {
       timestamp: Date.now(),
@@ -238,8 +236,8 @@ export function getSessionErrorHandler(): SessionErrorHandler {
  * Subscribe to session errors with custom handler
  * Useful for testing or custom error handling
  */
-export function onSessionError(
-  handler: (event: { sessionID?: string; error: any }) => void
-): () => void {
-  return Bus.subscribe(Session.Event.Error, handler)
+export function onSessionError(handler: (event: { sessionID?: string; error: any }) => void): () => void {
+  return Bus.subscribe(Session.Event.Error, (event) => {
+    handler(event as unknown as { sessionID?: string; error: any })
+  })
 }

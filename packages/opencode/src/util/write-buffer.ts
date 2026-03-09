@@ -116,9 +116,9 @@ export class WriteBuffer {
       this.pos = 0
       this.flushed += data.length
 
-      getLog().debug("flushed", { size: data.length })
+      getLog().debug()
     } catch (error) {
-      getLog().error("flush error", { error })
+      getLog().error()
       throw error
     } finally {
       this.flushing = false
