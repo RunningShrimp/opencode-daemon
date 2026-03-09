@@ -1,3 +1,5 @@
+import { Log } from "@/util/log"
+
 export interface ToTConfig {
   enabled: boolean
   beamWidth: number
@@ -8,12 +10,12 @@ export interface ToTConfig {
 }
 
 export const DEFAULT_TOT_CONFIG: ToTConfig = {
-  enabled: false,
+  enabled: true,
   beamWidth: 3,
-  maxDepth: 3,
-  evaluationThreshold: 0.5,
+  maxDepth: 5,
+  evaluationThreshold: 0.6,
   enableBacktracking: true,
-  expansionsPerStep: 2,
+  expansionsPerStep: 3,
 }
 
 export interface ThoughtNode {
@@ -26,11 +28,11 @@ export interface ThoughtNode {
   depth: number
   isLeaf: boolean
   createdAt: number
-  toolCall?: {
-    tool: string
-    input: Record<string, unknown>
-    output?: string
-  }
+  reasoning?: string
+  evaluations?: {
+    score: number
+    reasoning: string
+  }[]
 }
 
 export interface ToTState {
@@ -48,10 +50,16 @@ export interface ToTDecision {
   confidence: number
 }
 
+export interface LLMClient {
+  generate(prompt: string, system?: string): Promise<string>
+}
+
 export class TreeOfThought {
   private config: ToTConfig
   private state: ToTState
   private initialized: boolean = false
+  private llm: LLMClient | null = null
+  private log = Log.create({ service: "ai.thinking.tot" })
 
   constructor(config: Partial<ToTConfig> = {}) {
     this.config = { ...DEFAULT_TOT_CONFIG, ...config }
@@ -62,6 +70,10 @@ export class TreeOfThought {
       bestPath: [],
       bestScore: 0,
     }
+  }
+
+  setLLM(llm: LLMClient) {
+    this.llm = llm
   }
 
   initialize(): void {
@@ -77,50 +89,66 @@ export class TreeOfThought {
 
   async startThinking(initialPrompt: string): Promise<ThoughtNode> {
     if (!this.initialized) {
-      throw new Error("ToT not initialized")
+      this.initialize()
     }
 
     const rootNode: ThoughtNode = {
       id: this.generateId(),
       content: initialPrompt,
       score: 1.0,
-      confidence: 0.5,
+      confidence: 1.0,
       parentId: null,
       children: [],
       depth: 0,
       isLeaf: false,
       createdAt: Date.now(),
+      reasoning: "Root problem statement",
     }
 
     this.state.root = rootNode
     this.state.nodes.set(rootNode.id, rootNode)
     this.state.frontier = [rootNode]
+    this.state.bestPath = [rootNode]
+    this.state.bestScore = 1.0
 
     return rootNode
   }
 
   async expandFrontier(context?: string): Promise<void> {
-    if (!this.initialized) {
-      throw new Error("ToT not initialized")
+    if (!this.initialized || !this.llm) {
+      throw new Error("ToT not initialized or LLM not set")
     }
 
     const newFrontier: ThoughtNode[] = []
+    // Process current frontier nodes
+    // If frontier is empty but we have nodes, we might need to backtrack or we are done
+    if (this.state.frontier.length === 0 && this.config.enableBacktracking) {
+        // Simple backtracking: find non-leaf nodes that haven't been fully expanded? 
+        // For now, we assume frontier contains the active candidates.
+        return
+    }
 
-    for (const node of this.state.frontier) {
-      if (node.depth >= this.config.maxDepth) {
-        node.isLeaf = true
-        continue
-      }
+    const nodesToExpand = this.state.frontier.filter(n => !n.isLeaf && n.depth < this.config.maxDepth)
+    
+    if (nodesToExpand.length === 0) {
+        this.log.info("No nodes to expand in frontier")
+        return
+    }
 
+    this.log.info(`Expanding ${nodesToExpand.length} nodes from frontier`)
+
+    for (const node of nodesToExpand) {
+      // Generate expansions
       const expansions = await this.generateExpansions(node, context)
-
-      for (const expansion of expansions) {
-        const evaluation = await this.evaluateThought(expansion, node, context)
-
-        if (evaluation.isValid && evaluation.score >= this.config.evaluationThreshold) {
+      
+      for (const expansionContent of expansions) {
+        // Evaluate each expansion
+        const evaluation = await this.evaluateThought(expansionContent, node, context)
+        
+        if (evaluation.score >= this.config.evaluationThreshold) {
           const newNode: ThoughtNode = {
             id: this.generateId(),
-            content: expansion,
+            content: expansionContent,
             score: evaluation.score,
             confidence: evaluation.confidence,
             parentId: node.id,
@@ -128,70 +156,111 @@ export class TreeOfThought {
             depth: node.depth + 1,
             isLeaf: false,
             createdAt: Date.now(),
+            reasoning: evaluation.reasoning,
+            evaluations: [{ score: evaluation.score, reasoning: evaluation.reasoning }]
           }
 
           node.children.push(newNode.id)
           this.state.nodes.set(newNode.id, newNode)
           newFrontier.push(newNode)
-
-          if (newNode.score > this.state.bestScore) {
-            this.state.bestScore = newNode.score
-            this.state.bestPath = this.getPathToNode(newNode)
+          
+          // Check if this path is the new best path
+          const pathScore = this.calculatePathScore(newNode)
+          if (pathScore > this.state.bestScore) {
+             this.state.bestScore = pathScore
+             this.state.bestPath = this.getPathToNode(newNode)
           }
         }
       }
+      
+      // Mark parent as expanded/processed for this round (removed from next frontier)
     }
 
+    // Prune and select new frontier based on beam width
     newFrontier.sort((a, b) => b.score - a.score)
     this.state.frontier = newFrontier.slice(0, this.config.beamWidth)
+    
+    this.log.info(`New frontier size: ${this.state.frontier.length}`)
   }
 
-  private async generateExpansions(_node: ThoughtNode, _context?: string): Promise<string[]> {
+  private calculatePathScore(node: ThoughtNode): number {
+      // Simple path score: average of node scores along the path
+      const path = this.getPathToNode(node)
+      if (path.length === 0) return 0
+      const sum = path.reduce((acc, n) => acc + n.score, 0)
+      return sum / path.length
+  }
+
+  private async generateExpansions(node: ThoughtNode, context?: string): Promise<string[]> {
+    if (!this.llm) return []
+
+    const prompt = `
+You are an intelligent agent solving a complex problem.
+Current Goal/Thought: "${node.content}"
+${context ? `Additional Context: ${context}` : ""}
+
+Generate ${this.config.expansionsPerStep} distinct next steps or sub-thoughts to advance towards the solution.
+Each thought should be a concrete, actionable step or a specific reasoning path.
+Avoid vague statements.
+
+Output Format:
+- [Thought 1]
+- [Thought 2]
+...
+`
     try {
-      const expansions: string[] = []
-      const lines = [
-        "Approach 1: Consider breaking the problem into smaller sub-problems",
-        "Approach 2: Try a different algorithm or data structure",
-        "Approach 3: Focus on edge cases and error handling",
-      ]
-
-      for (const line of lines) {
-        const approach = line.replace(/Approach \d+: /, "").trim()
-        if (approach) expansions.push(approach)
-      }
-
-      return expansions.slice(0, this.config.expansionsPerStep)
-    } catch (_error) {
+      const response = await this.llm.generate(prompt)
+      return response
+        .split("\n")
+        .map(line => line.trim())
+        .filter(line => line.startsWith("-"))
+        .map(line => line.replace(/^-\s*/, "").trim())
+        .filter(line => line.length > 0)
+        .slice(0, this.config.expansionsPerStep)
+    } catch (e) {
+      this.log.error("Failed to generate expansions", { error: e })
       return []
     }
   }
 
   private async evaluateThought(
     thought: string,
-    _parent: ThoughtNode,
-    _context?: string,
-  ): Promise<{ score: number; confidence: number; reasoning: string; isValid: boolean }> {
-    let score = 0.5
-    let confidence = 0.5
+    parent: ThoughtNode,
+    context?: string,
+  ): Promise<{ score: number; confidence: number; reasoning: string }> {
+    if (!this.llm) return { score: 0.5, confidence: 0.5, reasoning: "No LLM" }
 
-    if (thought.includes("error") || thought.includes("fail")) {
-      score -= 0.2
-    }
+    const prompt = `
+Evaluate the following thought/step in the context of solving the parent problem.
 
-    if (thought.includes("success") || thought.includes("complete")) {
-      score += 0.1
-      confidence += 0.1
-    }
+Parent Thought: "${parent.content}"
+Proposed Step: "${thought}"
+${context ? `Context: ${context}` : ""}
 
-    if (thought.includes("security") || thought.includes("vulnerability")) {
-      score -= 0.1
-    }
+Assess the potential of this step to lead to a correct solution.
+Rate it from 0.0 to 1.0 (1.0 being excellent/certain).
+Provide a brief reasoning.
 
-    return {
-      score,
-      confidence,
-      reasoning: "Based on content analysis",
-      isValid: true,
+Output Format:
+Score: <0.0-1.0>
+Reasoning: <one sentence reasoning>
+`
+    try {
+        const response = await this.llm.generate(prompt)
+        const scoreMatch = response.match(/Score:\s*([\d.]+)/i)
+        const reasoningMatch = response.match(/Reasoning:\s*(.+)/i)
+        
+        const score = scoreMatch ? parseFloat(scoreMatch[1]) : 0.5
+        const reasoning = reasoningMatch ? reasoningMatch[1] : "Parsed from evaluation"
+        
+        return {
+            score: Math.min(1, Math.max(0, score)),
+            confidence: score, // Using score as confidence for now
+            reasoning
+        }
+    } catch (e) {
+        this.log.error("Failed to evaluate thought", { error: e })
+        return { score: 0.5, confidence: 0.5, reasoning: "Evaluation failed" }
     }
   }
 
@@ -209,21 +278,23 @@ export class TreeOfThought {
 
   makeDecision(context?: string): ToTDecision {
     if (this.state.frontier.length === 0) {
-      if (this.config.enableBacktracking) {
-        return this.backtrack(context)
+      // If frontier empty, fallback to best path leaf
+      if (this.state.bestPath.length > 0) {
+          const best = this.state.bestPath[this.state.bestPath.length - 1]
+          return {
+              selectedNode: best,
+              alternatives: [],
+              reasoning: "Frontier empty, selecting best known path leaf",
+              confidence: best.confidence
+          }
       }
-
-      const bestNode = this.state.bestPath[this.state.bestPath.length - 1]
-      return {
-        selectedNode: bestNode ?? this.state.root!,
-        alternatives: [],
-        reasoning: "Using best known path",
-        confidence: this.state.bestScore,
-      }
+      return this.backtrack(context)
     }
 
-    const selected = this.state.frontier[0]
-    const alternatives = this.state.frontier.slice(1)
+    // Sort frontier by score
+    const sorted = [...this.state.frontier].sort((a, b) => b.score - a.score)
+    const selected = sorted[0]
+    const alternatives = sorted.slice(1)
 
     return {
       selectedNode: selected,
@@ -234,12 +305,16 @@ export class TreeOfThought {
   }
 
   private backtrack(_context?: string): ToTDecision {
-    return {
-      selectedNode: this.state.root!,
-      alternatives: [],
-      reasoning: "Backtracked to root",
-      confidence: 0.5,
-    }
+      // Fallback logic
+      if (this.state.root) {
+          return {
+              selectedNode: this.state.root,
+              alternatives: [],
+              reasoning: "Backtracked to root",
+              confidence: 0.1
+          }
+      }
+      throw new Error("Cannot backtrack, no root")
   }
 
   getCurrentState(): ToTState {
@@ -252,29 +327,6 @@ export class TreeOfThought {
 
   getFrontier(): ThoughtNode[] {
     return [...this.state.frontier]
-  }
-
-  visualize(): string {
-    if (!this.state.root) return "(empty)"
-
-    const lines: string[] = []
-    this.visualizeNode(this.state.root, "", lines)
-    return lines.join("\n")
-  }
-
-  private visualizeNode(node: ThoughtNode, prefix: string, lines: string[]): void {
-    const marker = node.isLeaf ? "Leaf" : "Node"
-    lines.push(`${prefix}[${marker}] ${node.content.slice(0, 50)}... (score: ${node.score.toFixed(2)})`)
-
-    const children = node.children
-      .map((id) => this.state.nodes.get(id))
-      .filter((n): n is ThoughtNode => n !== undefined)
-
-    for (let i = 0; i < children.length; i++) {
-      const isLast = i === children.length - 1
-      const newPrefix = prefix + (isLast ? "    " : "│   ")
-      this.visualizeNode(children[i], newPrefix, lines)
-    }
   }
 
   reset(): void {
@@ -291,38 +343,4 @@ export class TreeOfThought {
   private generateId(): string {
     return `thought_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`
   }
-}
-
-class ToTManager {
-  private instances: Map<string, TreeOfThought> = new Map()
-
-  getOrCreate(sessionId: string, config?: Partial<ToTConfig>): TreeOfThought {
-    let tot = this.instances.get(sessionId)
-    if (!tot) {
-      tot = new TreeOfThought(config)
-      this.instances.set(sessionId, tot)
-    }
-    return tot
-  }
-
-  remove(sessionId: string): void {
-    const tot = this.instances.get(sessionId)
-    if (tot) {
-      tot.reset()
-      this.instances.delete(sessionId)
-    }
-  }
-
-  clear(): void {
-    for (const tot of this.instances.values()) {
-      tot.reset()
-    }
-    this.instances.clear()
-  }
-}
-
-export const globalToTManager = new ToTManager()
-
-export function getToT(sessionId: string, config?: Partial<ToTConfig>): TreeOfThought {
-  return globalToTManager.getOrCreate(sessionId, config)
 }

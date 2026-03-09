@@ -1,3 +1,4 @@
+import { TreeOfThought, type LLMClient } from "./tree-of-thought"
 import { SelfMonitor, AgentState } from "./self-monitor"
 import { MetacognitionEngine } from "./metacognition"
 import { GoalManager, GoalStatus, GoalPriority } from "./goal-manager"
@@ -6,6 +7,12 @@ import { ExperienceLearning } from "./experience-learning"
 import type { Hypothesis } from "./evidence"
 import type { TaskIntent } from "./intent"
 import { Log } from "@/util/log"
+
+// import { SelfReviewWorkflow } from "@/ai/workflow/self-review-workflow"
+// import { QualityGate } from "@/ai/workflow/quality-gate"
+
+// import { ThoughtNodeStorage } from "@/ai/thinking/thought-storage"
+// import { ThinkTreeUI } from "@/cli/cmd/tui/components/think-tree-ui"
 
 const log = Log.create({ service: "self-driving-loop" })
 
@@ -72,6 +79,11 @@ export class SelfDrivingLoop {
   private stepCount: number = 0
   private decisionHistory: LoopDecision[] = []
   private progressHistory: GoalProgressState[] = []
+  // private workflow: SelfReviewWorkflow
+  // private qualityGate: QualityGate
+  // private thoughtStorage: ThoughtNodeStorage
+  // private thinkTreeUI: ThinkTreeUI
+  private tot: TreeOfThought
 
   constructor(config?: Partial<SelfDrivingConfig>) {
     this.config = { ...DEFAULT_SELF_DRIVING_CONFIG, ...config }
@@ -79,6 +91,11 @@ export class SelfDrivingLoop {
     this.metacognition = new MetacognitionEngine(this.monitor)
     this.goalManager = new GoalManager()
     this.experienceLearning = new ExperienceLearning()
+    // this.workflow = new SelfReviewWorkflow()
+    // this.qualityGate = new QualityGate()
+    // this.thoughtStorage = new ThoughtNodeStorage()
+    // this.thinkTreeUI = new ThinkTreeUI()
+    this.tot = new TreeOfThought()
     this.loopState = {
       phase: LoopPhase.SENSING,
       stepCount: 0,
@@ -111,6 +128,10 @@ export class SelfDrivingLoop {
     }
   }
 
+  setLLM(llm: LLMClient) {
+    this.tot.setLLM(llm)
+  }
+
   private extractGoalTitle(intent: TaskIntent): string {
     return `Complete ${intent.type} task`
   }
@@ -125,27 +146,96 @@ export class SelfDrivingLoop {
     return criteria
   }
   async sense(): Promise<void> {
-    this.monitor.transitionState(AgentState.THINKING)
+    this.monitor.transitionState(AgentState.SENSING)
   }
-  async perceive(): Promise<void> {
-    this.monitor.transitionState(AgentState.THINKING)
+  
+  async perceive(context?: Record<string, unknown>): Promise<void> {
+    this.monitor.transitionState(AgentState.PERCEIVING)
+    if (context) {
+        this.loopState.context = { ...this.loopState.context, ...context }
+    }
   }
+  
   async plan(): Promise<void> {
-    this.monitor.transitionState(AgentState.THINKING)
+    this.monitor.transitionState(AgentState.PLANNING)
+
+    if (this.loopState.currentGoal) {
+        try {
+            // Initialize thinking if needed
+            if (!this.tot.getCurrentState().root) {
+                await this.tot.startThinking(this.loopState.currentGoal.description)
+            }
+
+            // Expand thoughts to find best path
+            await this.tot.expandFrontier(JSON.stringify(this.loopState.context))
+            
+            // Make a decision based on current thoughts
+            const decision = this.tot.makeDecision(JSON.stringify(this.loopState.context))
+            
+            if (decision.selectedNode && decision.selectedNode.content !== this.loopState.currentGoal.description) {
+                // If the selected thought is a refinement/step, add it as a pending decision or subgoal
+                log.info("ToT planned next step", { step: decision.selectedNode.content, score: decision.selectedNode.score })
+                
+                this.loopState.pendingDecisions.push({
+                    phase: LoopPhase.ACTING,
+                    action: decision.selectedNode.content,
+                    reasoning: decision.reasoning,
+                    confidence: decision.confidence,
+                    expectedOutcome: "Step completion"
+                })
+            }
+        } catch (error) {
+            log.error("ToT planning failed", { error })
+        }
+    }
   }
   async act(): Promise<void> {
     this.monitor.transitionState(AgentState.EXECUTING)
   }
+  
   async reflect(): Promise<void> {
     this.monitor.transitionState(AgentState.REFLECTING)
+    try {
+        const reflection = await this.metacognition.reflect("Periodic reflection")
+        this.loopState.lastReflection = Date.now()
+        this.loopState.context["recentInsights"] = reflection.insights
+        
+        // Learn from reflection
+        this.experienceLearning.learnFromReflection({
+            insights: reflection.insights,
+            strategyAdjustments: reflection.strategyAdjustments.map(s => `${s.previousStrategy} -> ${s.newStrategy}`),
+            newHypotheses: reflection.newHypotheses.map(h => h.statement)
+        }, this.loopState.context)
+    } catch (error) {
+        log.error("Reflection failed", { error })
+    }
   }
+  
   async learn(): Promise<void> {
     this.monitor.transitionState(AgentState.LEARNING)
   }
+  
   async adapt(): Promise<void> {
-    this.monitor.transitionState(AgentState.LEARNING)
+    this.monitor.transitionState(AgentState.ADAPTING)
+    try {
+        const adaptations = this.goalManager.adaptGoals("Automatic adaptation triggered")
+        if (adaptations.length > 0) {
+            log.info("Goals adapted", { adaptations })
+            this.loopState.context["lastAdaptation"] = adaptations
+            
+            // If goals were split or refined, update current goal reference if needed
+            if (this.loopState.currentGoal) {
+                const updated = this.goalManager.getGoal(this.loopState.currentGoal.id)
+                if (updated) this.loopState.currentGoal = updated
+            }
+        }
+    } catch (error) {
+        log.error("Adaptation failed", { error })
+    }
   }
+  
   async runStep(): Promise<LoopDecision> {
+    this.stepCount++
     const decision: LoopDecision = {
       phase: this.loopState.phase,
       action: "Continue",
@@ -156,6 +246,7 @@ export class SelfDrivingLoop {
     this.decisionHistory.push(decision)
     return decision
   }
+  
   getDecisionHistory(): LoopDecision[] {
     return [...this.decisionHistory]
   }
@@ -226,7 +317,7 @@ ${expReport}
     }
     return false
   }
-  setupAutoContinueHooks(session: { on: (event: string, handler: (result: any) => Promise<void>) => void }) {
+  setupAutoContinueHooks(session: { on: (event: string, handler: (result: unknown) => Promise<void>) => void }) {
     session.on("tool_complete", async (_result) => {
       const remaining = this.detectRemainingWork()
       if (remaining.hasRemaining && remaining.progress > 0.5) {
@@ -234,8 +325,9 @@ ${expReport}
       }
     })
   }
-  private async autoContinue(_action: string) {
+  private async autoContinue(action: string) {
     this.monitor.transitionState(AgentState.EXECUTING)
+    log.info("Auto-continuing with action", { action })
     await this.act()
   }
   async saveGoalState(): Promise<void> {
@@ -280,6 +372,45 @@ ${expReport}
     this.decisionHistory = []
     this.stepCount = 0
     this.progressHistory = []
+  }
+
+  // --- New Methods for SelfDrivenAgent Compatibility ---
+
+  getCurrentState(): LoopState {
+    return this.loopState
+  }
+
+  getGoalManager(): GoalManager {
+    return this.goalManager
+  }
+
+  getExperienceLearning(): ExperienceLearning {
+    return this.experienceLearning
+  }
+
+  getMetacognition(): MetacognitionEngine {
+    return this.metacognition
+  }
+
+  shouldReflect(): boolean {
+    // Reflect if monitoring says so, or based on config
+    return this.config.enableAutomaticReflection && (this.monitor.shouldReflect() || this.stepCount % 5 === 0)
+  }
+
+  shouldRequestUserInput(): boolean {
+    return this.monitor.shouldRequestHelp()
+  }
+
+  onToolResult(success: boolean, result?: string): void {
+     if (success) {
+         this.monitor.recordSuccess(result?.substring(0, 50) ?? "Tool execution")
+     } else {
+         this.monitor.recordError(result ?? "Tool execution failed")
+     }
+     // Optionally update context with result
+     if (result) {
+         this.loopState.context["lastToolResult"] = result
+     }
   }
 }
 
