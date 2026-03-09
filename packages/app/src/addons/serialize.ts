@@ -244,10 +244,10 @@ class StringSerializeHandler extends BaseSerializeHandler {
   private _nullCellCount: number = 0
   private _cursorStyle: IBufferCell
   private _firstRow: number = 0
-  private _lastCursorRow: number = 0
-  private _lastCursorCol: number = 0
   private _lastContentCursorRow: number = 0
   private _lastContentCursorCol: number = 0
+  private _lastCursorRow: number = 0
+  private _lastCursorCol: number = 0
 
   constructor(
     buffer: IBuffer,

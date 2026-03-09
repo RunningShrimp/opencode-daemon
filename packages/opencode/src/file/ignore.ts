@@ -1,4 +1,3 @@
-import { sep } from "node:path"
 import { Glob } from "../util/glob"
 
 export namespace FileIgnore {

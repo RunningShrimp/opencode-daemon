@@ -202,8 +202,6 @@ export class MetacognitionEngine {
   }
 
   validateHypotheses(evidence: Evidence[]): Hypothesis[] {
-    const evidenceMap = new Map(evidence.map((e) => [e.id, e]))
-
     return this.currentHypotheses.filter((h) => {
       const evidenceIds = new Set(h.evidenceIds)
       const hasEvidence = h.evidenceIds.every((id) => evidenceIds.has(id))
@@ -233,7 +231,6 @@ export class MetacognitionEngine {
 
   async reflect(trigger: string, depth: "shallow" | "moderate" | "deep" = "moderate"): Promise<ReflectionResult> {
     const state = this.monitor.getState()
-    const metrics = this.monitor.getMetrics()
     const previousConfidence = state.confidence
 
     const insights = await this.generateInsights(depth)
@@ -427,7 +424,6 @@ export class MetacognitionEngine {
   }
 
   getMetacognitiveReport(): string {
-    const state = this.monitor.getState()
     const patterns = this.getCognitivePatterns()
     const insights = this.getInsights()
 

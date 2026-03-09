@@ -10,12 +10,6 @@ type PermissionObject = Record<string, PermissionAction>
 type PermissionValue = PermissionAction | PermissionObject | string[] | undefined
 type PermissionMap = Record<string, PermissionValue>
 
-type PermissionItem = {
-  id: string
-  title: string
-  description: string
-}
-
 const ACTIONS = [
   { value: "allow", label: "settings.permissions.action.allow" },
   { value: "ask", label: "settings.permissions.action.ask" },

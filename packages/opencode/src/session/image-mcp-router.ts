@@ -4,11 +4,9 @@ import {
   getGlobalMCPRouter,
   type MCPToolCapability,
   type RoutingDecision,
-  type MCPRouterConfig,
 } from "@/util/smart-router"
 import { MCP } from "@/mcp"
-import { Provider } from "@/provider/provider"
-import { getImageAnalyzer, type ImageFeature } from "./image-analyzer"
+import type { ImageFeature } from "./image-analyzer"
 
 const log = Log.create({ service: "image.mcp.router" })
 
@@ -69,7 +67,6 @@ export class ImageMCPRouter {
   private async registerImageTools(): Promise<void> {
     try {
       const mcpTools = await MCP.tools()
-      const analyzer = getImageAnalyzer()
 
       for (const [toolId, tool] of Object.entries(mcpTools)) {
         // Check if this tool might be related to image processing
@@ -196,7 +193,6 @@ export class ImageMCPRouter {
     }
 
     // Build task description based on image features
-    const complexity = features[0]?.complexity || "medium"
     const mimeType = features[0]?.mimeType || ""
 
     let task = "analyze image content"

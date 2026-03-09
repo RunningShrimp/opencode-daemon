@@ -1,5 +1,5 @@
-import { createStore, produce, type SetStoreFunction } from "solid-js/store"
-import { createEffect, on, onMount, onCleanup } from "solid-js"
+import { createStore } from "solid-js/store"
+import { createEffect, on } from "solid-js"
 import type { PromptInfo } from "../prompt/history"
 
 export interface PromptState {
@@ -11,8 +11,6 @@ export interface PromptState {
 }
 
 const PLACEHOLDERS = ["Fix a TODO in codebase", "What is tech stack of this project?", "Fix broken tests"]
-const SHELL_PLACEHOLDERS = ["ls -la", "git status", "pwd"]
-
 export function usePromptState(sessionID: () => string | undefined, onPromptChange: (state: PromptState) => void) {
   const [store, setStore] = createStore<PromptState>({
     placeholder: Math.floor(Math.random() * PLACEHOLDERS.length),

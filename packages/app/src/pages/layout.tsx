@@ -1938,7 +1938,7 @@ export default function Layout(props: ParentProps) {
                           size="large"
                           icon="plus-small"
                           class="w-full"
-                          onClick={() => navigateWithSidebarReset(`/${base64Encode(p().worktree)}/session`)}
+                          onClick={() => navigateWithSidebarReset(`/${base64Encode(p.worktree)}/session`)}
                         >
                           {language.t("command.session.new")}
                         </Button>
@@ -1956,7 +1956,7 @@ export default function Layout(props: ParentProps) {
                 >
                   <>
                     <div class="shrink-0 py-4 px-3">
-                      <Button size="large" icon="plus-small" class="w-full" onClick={() => createWorkspace(p())}>
+                      <Button size="large" icon="plus-small" class="w-full" onClick={() => createWorkspace(p)}>
                         {language.t("workspace.new")}
                       </Button>
                     </div>

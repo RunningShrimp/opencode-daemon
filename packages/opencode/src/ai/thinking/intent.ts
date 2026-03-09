@@ -26,8 +26,6 @@ const COMPLEXITY_INDICATORS = {
 
 const DEBUGGING_KEYWORDS = ["error", "bug", "fix", "crash", "exception", "failed"] as const
 
-const EXPLORATION_KEYWORDS = ["explore", "find", "search", "show me", "show"] as const
-
 function extractTarget(prompt: string): string {
   const lower = prompt.toLowerCase()
   for (const keyword of REVIEW_KEYWORDS) {

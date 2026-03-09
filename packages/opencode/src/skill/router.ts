@@ -256,8 +256,6 @@ export namespace Skill {
   // 内置 Provider 实现
   // ============================================================================
 
-  const EXTERNAL_DIRS = [".claude", ".agents"]
-  const EXTERNAL_SKILL_PATTERN = "skills/**/SKILL.md"
   const OPENCODE_SKILL_PATTERN = "{skill,skills}/**/SKILL.md"
   const SKILL_PATTERN = "**/SKILL.md"
 
@@ -557,7 +555,7 @@ export namespace Skill {
       return result
     }
 
-    private async download(url: string, dest: string, signal?: AbortSignal): Promise<boolean> {
+    private async download(url: string, dest: string, _signal?: AbortSignal): Promise<boolean> {
       if (await Filesystem.exists(dest)) return true
 
       return fetch(url)

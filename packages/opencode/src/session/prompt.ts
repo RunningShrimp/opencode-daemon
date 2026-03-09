@@ -327,7 +327,7 @@ export namespace SessionPrompt {
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
       if (
         lastAssistant?.finish &&
-        !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
+        lastAssistant.finish !== "tool-calls" &&
         lastUser.id < lastAssistant.id
       ) {
         log.info("exiting loop", { sessionID })
@@ -696,8 +696,8 @@ export namespace SessionPrompt {
         break
       }
 
-      // Check if model finished (finish reason is not "tool-calls" or "unknown")
-      const modelFinished = processor.message.finish && !["tool-calls", "unknown"].includes(processor.message.finish)
+      // Check if model finished (finish reason is not "tool-calls")
+      const modelFinished = processor.message.finish && processor.message.finish !== "tool-calls"
 
       if (modelFinished && !processor.message.error) {
         if (format.type === "json_schema") {

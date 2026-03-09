@@ -118,7 +118,6 @@ export class VectorStoreBackgroundService implements IBackgroundService {
   priority = 20
   private status: ServiceStatus = "idle"
   private memoryStore: PerProjectMemoryStore = new PerProjectMemoryStore()
-  private useMemoryStore = true
 
   async start(): Promise<void> {
     log.info("starting vector store service in background")
@@ -133,7 +132,6 @@ export class VectorStoreBackgroundService implements IBackgroundService {
   }
 
   async stop(): Promise<void> {
-    this.useMemoryStore = true
     this.status = "idle"
     this.memoryStore.clear()
     log.info("vector store stopped")

@@ -8,7 +8,6 @@ import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
 import { useLanguage } from "@/context/language"
 import { useSDK } from "@/context/sdk"
 
-const cache = new Map<string, { tab: number; answers: QuestionAnswer[]; custom: string[]; customOn: boolean[] }>()
 const MAX_CACHE_SIZE = 100
 
 class LRUCache<K, V> {
@@ -57,7 +56,9 @@ class LRUCache<K, V> {
   }
 }
 
-const cache = new LRUCache<string, { tab: number; answers: QuestionAnswer[]; custom: string[]; customOn: boolean[] }>(MAX_CACHE_SIZE)
+const cache = new LRUCache<string, { tab: number; answers: QuestionAnswer[]; custom: string[]; customOn: boolean[] }>(
+  MAX_CACHE_SIZE,
+)
 export const SessionQuestionDock: Component<{ request: QuestionRequest; onSubmit: () => void }> = (props) => {
   const sdk = useSDK()
   const language = useLanguage()

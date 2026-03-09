@@ -49,7 +49,7 @@ describe("WriteBuffer", () => {
 
     test("accepts callback in constructor", async () => {
       let called = false
-      const b = new WriteBuffer({}, (data) => {
+      const b = new WriteBuffer({}, () => {
         called = true
         return Promise.resolve()
       })

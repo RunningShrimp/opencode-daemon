@@ -434,8 +434,8 @@ describe("ConcurrencyLimiterManager", () => {
     const manager = new ConcurrencyLimiterManager(1)
 
     // Create limiters and drain immediately
-    const limiter1 = manager.getLimiter("limiter1", 1)
-    const limiter2 = manager.getLimiter("limiter2", 1)
+    manager.getLimiter("limiter1", 1)
+    manager.getLimiter("limiter2", 1)
 
     // Drain both
     const total = manager.drainAll(new Error("drain"))

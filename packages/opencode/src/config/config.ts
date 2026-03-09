@@ -1,6 +1,6 @@
 import { Log } from "../util/log"
 import path from "path"
-import { pathToFileURL, fileURLToPath } from "url"
+import { pathToFileURL } from "url"
 import { createRequire } from "module"
 import os from "os"
 import z from "zod"
@@ -699,7 +699,7 @@ export namespace Config {
       permission: Permission.optional(),
     })
     .catchall(z.any())
-    .transform((agent, ctx) => {
+    .transform((agent) => {
       const knownKeys = new Set([
         "name",
         "model",

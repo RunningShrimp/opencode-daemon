@@ -9,7 +9,6 @@ import type {
   Part,
   Path,
   PermissionRequest,
-  Project,
   ProviderListResponse,
   QuestionRequest,
   Session,

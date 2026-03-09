@@ -3,11 +3,7 @@ import { join } from "path"
 import { existsSync } from "fs"
 
 describe("Self-Critique Tool", () => {
-  let testDir: string
-
-  beforeEach(() => {
-    testDir = `/tmp/opencode-test/self-critique-${Date.now()}`
-  })
+  beforeEach(() => {})
 
   afterEach(() => {})
 

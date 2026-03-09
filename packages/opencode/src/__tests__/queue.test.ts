@@ -4,7 +4,7 @@
  * Tests for thread-safe queue implementations.
  */
 
-import { describe, test, expect, beforeEach } from "bun:test"
+import { describe, test, expect } from "bun:test"
 import { AsyncQueue, WorkPool, work, boundedWork } from "../util/queue"
 
 describe("AsyncQueue", () => {

@@ -46,7 +46,7 @@ export function calculateVerdict(
 }
 
 export function createSelfCritiqueOutput(
-  input: SelfCritiqueInput,
+  _input: SelfCritiqueInput,
   critique: string,
   improvements: string[],
   verdict: SelfCritiqueOutput["verdict"],

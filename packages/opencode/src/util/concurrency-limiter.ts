@@ -63,20 +63,6 @@ export class ConcurrencyLimiter {
   }
 
   /**
-   * Get active count (internal, for testing)
-   */
-  private get activeCount(): number {
-    return this._activeCount
-  }
-
-  /**
-   * Set active count (internal, for testing)
-   */
-  private set activeCount(value: number) {
-    this._activeCount = value
-  }
-
-  /**
    * Run a function with concurrency limiting.
    * If the concurrency limit is reached, the function will be queued.
    *

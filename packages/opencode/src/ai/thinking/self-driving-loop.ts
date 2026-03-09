@@ -2,27 +2,10 @@ import { SelfMonitor, AgentState } from "./self-monitor"
 import { MetacognitionEngine } from "./metacognition"
 import { GoalManager, GoalStatus, GoalPriority } from "./goal-manager"
 import type { Goal } from "./goal-manager"
-import type { ContextualLearning } from "./experience-learning"
 import { ExperienceLearning } from "./experience-learning"
 import type { Hypothesis } from "./evidence"
 import type { TaskIntent } from "./intent"
 import { Log } from "@/util/log"
-
-import { Session } from "@/session/session"
-
-import type { Tool } from "@/tool/tool"
-
-import type { MessageV2 } from "@/session/message-v2"
-
-import { EvidenceGatherTool } from "@/ai/tools/evidence-gather"
-import { SelfCritiqueTool } from "@/ai/tools/self-critique"
-import { ReviewVerifyTool } from "@/ai/tools/review-verify"
-import { SelfReviewWorkflow } from "@/ai/workflow/self-review-workflow"
-import { QualityGate } from "@/ai/workflow/quality-gate"
-
-import { ThoughtNodeStorage } from "@/ai/thinking/thought-storage"
-import { ThinkTreeUI } from "@/cli/cmd/tui/components/think-tree-ui"
-import { TreeOfThought } from "@/ai/thinking/tree-of-thought"
 
 const log = Log.create({ service: "self-driving-loop" })
 
@@ -89,10 +72,6 @@ export class SelfDrivingLoop {
   private stepCount: number = 0
   private decisionHistory: LoopDecision[] = []
   private progressHistory: GoalProgressState[] = []
-  private workflow: SelfReviewWorkflow
-  private qualityGate: QualityGate
-  private thoughtStorage: ThoughtNodeStorage
-  private thinkTreeUI: ThinkTreeUI
 
   constructor(config?: Partial<SelfDrivingConfig>) {
     this.config = { ...DEFAULT_SELF_DRIVING_CONFIG, ...config }
@@ -100,10 +79,6 @@ export class SelfDrivingLoop {
     this.metacognition = new MetacognitionEngine(this.monitor)
     this.goalManager = new GoalManager()
     this.experienceLearning = new ExperienceLearning()
-    this.workflow = new SelfReviewWorkflow()
-    this.qualityGate = new QualityGate()
-    this.thoughtStorage = new ThoughtNodeStorage()
-    this.thinkTreeUI = new ThinkTreeUI()
     this.loopState = {
       phase: LoopPhase.SENSING,
       stepCount: 0,
@@ -139,10 +114,10 @@ export class SelfDrivingLoop {
   private extractGoalTitle(intent: TaskIntent): string {
     return `Complete ${intent.type} task`
   }
-  private determinePriority(intent: TaskIntent): GoalPriority {
+  private determinePriority(_intent: TaskIntent): GoalPriority {
     return GoalPriority.HIGH
   }
-  private extractSuccessCriteria(intent: TaskIntent): string[] {
+  private extractSuccessCriteria(_intent: TaskIntent): string[] {
     const criteria: string[] = []
     criteria.push("Task completed successfully")
     criteria.push("All requirements met")
@@ -150,13 +125,13 @@ export class SelfDrivingLoop {
     return criteria
   }
   async sense(): Promise<void> {
-    this.monitor.transitionState(AgentState.SENSING)
+    this.monitor.transitionState(AgentState.THINKING)
   }
   async perceive(): Promise<void> {
-    this.monitor.transitionState(AgentState.PERCEIVING)
+    this.monitor.transitionState(AgentState.THINKING)
   }
   async plan(): Promise<void> {
-    this.monitor.transitionState(AgentState.PLANNING)
+    this.monitor.transitionState(AgentState.THINKING)
   }
   async act(): Promise<void> {
     this.monitor.transitionState(AgentState.EXECUTING)
@@ -168,7 +143,7 @@ export class SelfDrivingLoop {
     this.monitor.transitionState(AgentState.LEARNING)
   }
   async adapt(): Promise<void> {
-    this.monitor.transitionState(AgentState.ADAPTING)
+    this.monitor.transitionState(AgentState.LEARNING)
   }
   async runStep(): Promise<LoopDecision> {
     const decision: LoopDecision = {
@@ -252,14 +227,14 @@ ${expReport}
     return false
   }
   setupAutoContinueHooks(session: { on: (event: string, handler: (result: any) => Promise<void>) => void }) {
-    session.on("tool_complete", async (result) => {
+    session.on("tool_complete", async (_result) => {
       const remaining = this.detectRemainingWork()
       if (remaining.hasRemaining && remaining.progress > 0.5) {
         await this.autoContinue(remaining.suggestedActions[0])
       }
     })
   }
-  private async autoContinue(action: string) {
+  private async autoContinue(_action: string) {
     this.monitor.transitionState(AgentState.EXECUTING)
     await this.act()
   }
@@ -314,4 +289,3 @@ export interface GoalProgressState {
   completedCriteria: string[]
   timestamp: number
 }
-

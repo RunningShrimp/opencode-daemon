@@ -146,16 +146,7 @@ export class TreeOfThought {
     this.state.frontier = newFrontier.slice(0, this.config.beamWidth)
   }
 
-  private async generateExpansions(node: ThoughtNode, context?: string): Promise<string[]> {
-    const prompt = `Given the current thought:
-"${node.content}"
-
-${context ? `Context:\n${context}\n` : ""}
-Generate ${this.config.expansionsPerStep} different approaches or solutions to continue this thinking.
-Each approach should be distinct and explore a different angle.
-
-Respond with each approach on a new line starting with a dash (-):`
-
+  private async generateExpansions(_node: ThoughtNode, _context?: string): Promise<string[]> {
     try {
       const expansions: string[] = []
       const lines = [
@@ -177,8 +168,8 @@ Respond with each approach on a new line starting with a dash (-):`
 
   private async evaluateThought(
     thought: string,
-    parent: ThoughtNode,
-    context?: string,
+    _parent: ThoughtNode,
+    _context?: string,
   ): Promise<{ score: number; confidence: number; reasoning: string; isValid: boolean }> {
     let score = 0.5
     let confidence = 0.5
@@ -242,7 +233,7 @@ Respond with each approach on a new line starting with a dash (-):`
     }
   }
 
-  private backtrack(context?: string): ToTDecision {
+  private backtrack(_context?: string): ToTDecision {
     return {
       selectedNode: this.state.root!,
       alternatives: [],

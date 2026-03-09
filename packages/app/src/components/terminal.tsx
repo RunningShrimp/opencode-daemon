@@ -173,7 +173,6 @@ export const Terminal = (props: TerminalProps) => {
   const scrollY = typeof local.pty.scrollY === "number" ? local.pty.scrollY : undefined
   let ws: WebSocket | undefined
   let term: Term | undefined
-  let ghostty: Ghostty
   let serializeAddon: SerializeAddon
   let fitAddon: FitAddon
   let handleResize: () => void
@@ -187,6 +186,7 @@ export const Terminal = (props: TerminalProps) => {
     typeof local.pty.cursor === "number" && Number.isSafeInteger(local.pty.cursor) ? local.pty.cursor : undefined
   let cursor = start ?? 0
   let output: ReturnType<typeof terminalWriter> | undefined
+  let ghostty: Ghostty
 
   const cleanup = () => {
     if (!cleanups.length) return

@@ -15,13 +15,6 @@ const SelfCritiqueParameters = z.object({
 
 type SelfCritiqueParams = z.infer<typeof SelfCritiqueParameters>
 
-type SelfCritiqueResult = {
-  findings: CritiqueFinding[]
-  pessimisticChecks: PessimisticCheck[]
-  overallAssessment: string
-  confidenceLevel: "high" | "medium" | "low"
-}
-
 const DEFAULT_FOCUS_AREAS = ["correctness", "security", "performance", "maintainability"] as const
 
 interface ClaimAnalysis {
@@ -286,13 +279,6 @@ export const SelfCritiqueTool = Tool.define("self_critique", async () => ({
     }
 
     const { assessment, confidence } = generateOverallAssessment(findings, allPessimisticChecks)
-
-    const result: SelfCritiqueResult = {
-      findings,
-      pessimisticChecks: allPessimisticChecks,
-      overallAssessment: assessment,
-      confidenceLevel: confidence,
-    }
 
     const output = `## Self Critique Results
 

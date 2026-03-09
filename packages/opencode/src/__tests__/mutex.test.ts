@@ -4,7 +4,7 @@
  * Tests for the Mutex, NamedMutex, and related utilities.
  */
 
-import { describe, test, expect, beforeEach } from "bun:test"
+import { describe, test, expect } from "bun:test"
 import { Mutex, NamedMutex, createMutex, withMutex, withGlobalMutex, globalNamedMutex } from "../util/mutex"
 
 describe("Mutex", () => {
@@ -99,8 +99,6 @@ describe("Mutex", () => {
   describe("wait count", () => {
     test("tracks waiting operations", async () => {
       const mutex = new Mutex()
-      const mutex2 = new Mutex()
-
       const task1 = mutex.run(async () => {
         await new Promise((r) => setTimeout(r, 50))
         return "done"

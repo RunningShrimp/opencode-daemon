@@ -89,7 +89,6 @@ export class ACEContext {
   private playbook: Map<StrategyCategory, StrategyEntry[]> = new Map()
   private sessionStrategies: StrategyEntry[] = []
   private reflectionCounter: number = 0
-  private initialized: boolean = false
 
   constructor(config: Partial<ACEConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config }
@@ -160,7 +159,7 @@ export class ACEContext {
   /**
    * Get best strategy for a category and task
    */
-  getBestStrategy(category: StrategyCategory, taskContext: Record<string, unknown> = {}): StrategyEntry | null {
+  getBestStrategy(category: StrategyCategory, _taskContext: Record<string, unknown> = {}): StrategyEntry | null {
     const strategies = this.playbook.get(category) || []
     if (strategies.length === 0) {
       return null

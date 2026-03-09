@@ -1,5 +1,4 @@
 import { Log } from "@/util/log"
-import { Config } from "@/config/config"
 import { snapshot } from "@/provider/models-snapshot"
 import fs from "fs/promises"
 import path from "path"
@@ -83,7 +82,7 @@ export class ModelsCache {
     /** Cache TTL in milliseconds */
     cacheTTL?: number
     /** models.dev API URL */
-    apiUrl?: number
+    apiUrl?: string
     /** Request timeout in milliseconds */
     timeout?: number
   }) {
@@ -146,10 +145,10 @@ export class ModelsCache {
   private loadFromSnapshot(): void {
     this.cache.clear()
 
-    for (const [providerID, providerData] of Object.entries(snapshot)) {
+    for (const [providerID, providerData] of Object.entries(snapshot as Record<string, any>)) {
       if (!providerData.models) continue
 
-      for (const [modelID, modelData] of Object.entries(providerData.models)) {
+      for (const [modelID, modelData] of Object.entries(providerData.models as Record<string, any>)) {
         const fullModelID = `${providerID}/${modelID}`
 
         this.cache.set(fullModelID, {
@@ -276,7 +275,7 @@ export class ModelsCache {
       const models: ModelCapability[] = []
 
       // Parse API response
-      for (const [providerID, providerData] of Object.entries(data)) {
+      for (const [providerID, providerData] of Object.entries(data as Record<string, any>)) {
         if (!providerData.models) continue
 
         for (const [modelID, modelData] of Object.entries(providerData.models as Record<string, any>)) {

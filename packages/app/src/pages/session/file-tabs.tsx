@@ -368,12 +368,6 @@ export function FileTabContent(props: { tab: string }) {
     })
   }
 
-  const cancelCommenting = () => {
-    const p = path()
-    if (p) file.setSelectedLines(p, null)
-    setNote("commenting", null)
-  }
-
   let prev = {
     loaded: false,
     ready: false,

@@ -113,7 +113,6 @@ export class CompactionPredictor {
     }
 
     // Linear regression trend
-    const trend = this.calculateTrend()
     const growth = this.calculateGrowth()
 
     if (growth <= 0) {

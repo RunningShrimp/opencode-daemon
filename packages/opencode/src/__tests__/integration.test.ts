@@ -19,7 +19,7 @@ describe("Integration: Self-Driving + Self-Review + Think-Tree", () => {
   })
 
   test("Phase 1: Self-review workflow integrates with quality gate", async () => {
-    const mockCallTool = async (name: string, args: any) => {
+    const mockCallTool = async (name: string, _args: any) => {
       if (name === "self_critique") {
         return {
           findings: [{ severity: "low", message: "Minor issue" }],
@@ -117,7 +117,7 @@ describe("Integration: Self-Driving + Self-Review + Think-Tree", () => {
     treeOfThought.initialize()
     await treeOfThought.startThinking("Integration test reasoning")
 
-    const mockCallTool = async (name: string, args: any) => {
+    const mockCallTool = async (_name: string, _args: any) => {
       return {
         findings: [],
         completenessScore: 95,

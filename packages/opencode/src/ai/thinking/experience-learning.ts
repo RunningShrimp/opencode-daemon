@@ -304,7 +304,6 @@ export class ExperienceLearning {
   }
 
   getExperienceReport(context?: ContextualLearning): string {
-    const relevant = context ? this.getApplicableInsights(context) : this.experiences
     const patterns = context ? this.getRelevantPatterns(context) : Array.from(this.patterns.values())
 
     return `

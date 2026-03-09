@@ -21,7 +21,7 @@ This helps reduce hallucinations by grounding your understanding in actual code.
     query: z.string().describe("The search query to find relevant code context"),
     limit: z.number().min(1).max(20).default(5).describe("Number of results to return (default: 5)"),
   }),
-  execute: async (args, ctx) => {
+  execute: async (args, _ctx) => {
     const project = Instance.project
     if (!project) {
       return {
@@ -72,7 +72,7 @@ the knowledge base is up-to-date.`,
   parameters: z.object({
     mode: z.enum(["full", "incremental"]).default("incremental").describe("Full rebuild or incremental update"),
   }),
-  execute: async (args, ctx) => {
+  execute: async (args, _ctx) => {
     const project = Instance.project
     if (!project) {
       return {

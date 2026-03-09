@@ -204,7 +204,7 @@ export class Hashline {
     }
   }
 
-  findLineByHash(path: string, hash: string, content: string): Array<{ number: number; content: string }> {
+  findLineByHash(_path: string, hash: string, content: string): Array<{ number: number; content: string }> {
     const lines = content.split("\n")
     const results: Array<{ number: number; content: string }> = []
 
@@ -306,8 +306,6 @@ export class Hashline {
   }
 
   verifyRange(path: string, range: BlockRange, fileContent: string): VerifyResult {
-    const lines = fileContent.split("\n")
-
     const startResult = this.verify(path, range.start.line, range.start.hash, fileContent)
     if (!startResult.valid) return startResult
 

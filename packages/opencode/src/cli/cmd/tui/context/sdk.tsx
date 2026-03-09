@@ -2,6 +2,7 @@ import { createOpencodeClient, type Event } from "@opencode-ai/sdk/v2"
 import { createSimpleContext } from "./helper"
 import { createGlobalEmitter } from "@solid-primitives/event-bus"
 import { batch, onCleanup, onMount } from "solid-js"
+import { Log } from "@/util/log"
 
 export type EventSource = {
   on: (handler: (event: Event) => void) => () => void
@@ -60,7 +61,9 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
 
       // Report dropped events if any
       if (droppedCount > 0) {
-        console.warn(`Event queue: dropped ${droppedCount} events due to high frequency`)
+        Log.Default.warn("tui event queue dropped events", {
+          count: droppedCount,
+        })
         droppedCount = 0
       }
 

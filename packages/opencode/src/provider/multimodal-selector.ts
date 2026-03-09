@@ -1,5 +1,4 @@
 import { Log } from "@/util/log"
-import { Provider } from "@/provider/provider"
 import { snapshot } from "@/provider/models-snapshot"
 
 const log = Log.create({ service: "multimodal.selector" })
@@ -110,10 +109,10 @@ export class MultimodalModelSelector {
     const models: MultimodalModelOption[] = []
 
     // Iterate through all providers in the snapshot
-    for (const [providerID, providerData] of Object.entries(snapshot)) {
+    for (const [providerID, providerData] of Object.entries(snapshot as Record<string, any>)) {
       if (!providerData.models) continue
 
-      for (const [modelID, modelData] of Object.entries(providerData.models)) {
+      for (const [modelID, modelData] of Object.entries(providerData.models as Record<string, any>)) {
         // Check if model supports image input
         const inputModalities = modelData.modalities?.input || []
         const supportsImage = inputModalities.includes("image")
@@ -199,7 +198,7 @@ export class MultimodalModelSelector {
       case "medium":
         return { maxInput: 3.0, maxOutput: 6.0 }
       case "high":
-        return { maxInput: Infinity, output: Infinity }
+        return { maxInput: Infinity, maxOutput: Infinity }
     }
   }
 

@@ -1,4 +1,3 @@
-import { Instance } from "@/project/instance"
 import type { MiddlewareHandler } from "hono"
 import { Installation } from "../installation"
 import { getAdaptor } from "./adaptors"

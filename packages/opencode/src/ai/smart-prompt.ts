@@ -1,7 +1,3 @@
-import { Log } from "@/util/log"
-
-const log = Log.create({ service: "smart-prompt" })
-
 export interface SmartPromptConfig {
   basePrompt: string
   enableEvidenceTracking: boolean

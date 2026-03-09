@@ -180,7 +180,7 @@ export class RAGIndexer {
     for (let i = 0; i < filesToIndex.length; i += batchSize) {
       const batch = filesToIndex.slice(i, i + batchSize)
 
-      const batchResults = await Promise.all(
+      await Promise.all(
         batch.map(async (file) => {
           const chunks = await this.indexFile(file)
           stats.filesIndexed++
@@ -254,7 +254,7 @@ export class RAGIndexer {
     return stored
   }
 
-  async removeFile(filePath: string): Promise<number> {
+  async removeFile(_filePath: string): Promise<number> {
     return 0
   }
 }

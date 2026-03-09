@@ -24,7 +24,6 @@ export class WriteBuffer {
   private pos = 0
   private cfg: BufferConfig
   private timer: ReturnType<typeof setTimeout> | null = null
-  private lastFlush = 0
   private callback: FlushFn | null = null
   private flushing = false
   private written = 0
@@ -87,7 +86,6 @@ export class WriteBuffer {
     }
     this.flushed += data.length
     this.pos = 0
-    this.lastFlush = Date.now()
   }
 
   private scheduleFlush(): void {
@@ -116,7 +114,6 @@ export class WriteBuffer {
       }
 
       this.pos = 0
-      this.lastFlush = Date.now()
       this.flushed += data.length
 
       getLog().debug("flushed", { size: data.length })

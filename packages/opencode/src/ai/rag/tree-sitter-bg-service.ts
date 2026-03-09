@@ -1,9 +1,6 @@
 import { Log } from "@/util/log"
-import { Global } from "@/global"
 import { BackgroundServiceManager, type IBackgroundService, type ServiceStatus } from "@/util/background-service"
 import { ModuleLoader } from "@/util/module-loader"
-import path from "node:path"
-import { existsSync, mkdirSync } from "node:fs"
 
 const log = Log.create({ service: "tree-sitter-bg" })
 

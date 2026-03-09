@@ -1,9 +1,6 @@
-import { Log } from "@/util/log"
 import type { ThoughtNode } from "@/ai/thinking/tree-of-thought"
 
 export class ThinkTreeUI {
-  private log = Log.create({ service: "ui.think-tree" })
-
   renderTree(node: ThoughtNode, depth = 0): string {
     const indent = "  ".repeat(depth)
     const marker = node.children.length > 0 ? "├─" : "└─"
@@ -22,7 +19,7 @@ export class ThinkTreeUI {
     return output
   }
 
-  private getNode(id: string): ThoughtNode | null {
+  private getNode(_id: string): ThoughtNode | null {
     return null
   }
 

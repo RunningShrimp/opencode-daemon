@@ -157,7 +157,7 @@ export class FVARRAG {
 
   private async verifyClaim(
     claim: string,
-    originalQuery: string,
+    _originalQuery: string,
     projectId: string,
   ): Promise<{ supporting: Evidence[]; contradicting: Evidence[]; neutral: Evidence[] }> {
     const supporting: Evidence[] = []
@@ -215,7 +215,7 @@ export class FVARRAG {
 
   private async searchEvidence(
     query: string,
-    projectId: string,
+    _projectId: string,
   ): Promise<Array<{ content: string; filePath: string; lineNumber: number; score: number }>> {
     const results: Array<{ content: string; filePath: string; lineNumber: number; score: number }> = []
 

@@ -268,7 +268,6 @@ class TaskDecomposer {
 
 class ProactiveToolDiscoverer extends EventEmitter {
   private discoverTimer?: NodeJS.Timeout
-  private lastDiscovery = 0
   private discoveryInterval = 5 * 60 * 1000 // 5分钟
 
   startPeriodicDiscovery(
@@ -276,7 +275,8 @@ class ProactiveToolDiscoverer extends EventEmitter {
     router: MCPSmartRouter,
   ): void {
     this.discoverTimer = setInterval(() => {
-      this.discoverAndRegister(getTools(), router)
+      getTools()
+      this.discoverAndRegister(router)
     }, this.discoveryInterval)
   }
 
@@ -287,10 +287,7 @@ class ProactiveToolDiscoverer extends EventEmitter {
     }
   }
 
-  private discoverAndRegister(
-    availableTools: MCPToolCapability[],
-    router: MCPSmartRouter,
-  ): void {
+  private discoverAndRegister(router: MCPSmartRouter): void {
     // 基于使用模式主动发现可能需要的工具
     const recentTasks = router.getRecentTasks(10)
 
@@ -308,8 +305,6 @@ class ProactiveToolDiscoverer extends EventEmitter {
         }
       }
     }
-
-    this.lastDiscovery = Date.now()
   }
 }
 
@@ -459,7 +454,7 @@ export class MCPSmartRouter {
   }
 
   // Main routing function
-  selectTool(task: string, sessionId?: string): RoutingDecision {
+  selectTool(task: string, _sessionId?: string): RoutingDecision {
     if (!this.initialized || !this.cfg.enabled) {
       return {
         selectedTool: null,
@@ -534,7 +529,7 @@ export class MCPSmartRouter {
     }
   }
 
-  private handleDecomposedTask(task: string, subtasks: SubTask[]): RoutingDecision {
+  private handleDecomposedTask(_task: string, subtasks: SubTask[]): RoutingDecision {
     const toolSelections: MCPToolCapability[] = []
     const failedSubtasks: SubTask[] = []
 
@@ -627,11 +622,6 @@ export class MCPSmartRouter {
   private getSuccessRate(tool: MCPToolCapability): number {
     if (tool.successRates.length === 0) return 0.8
     return tool.successRates.reduce((a, b) => a + b, 0) / tool.successRates.length
-  }
-
-  private getErrorRate(tool: MCPToolCapability): number {
-    if (tool.errorRates.length === 0) return 0.1
-    return tool.errorRates.reduce((a, b) => a + b, 0) / tool.errorRates.length
   }
 
   // Find similar tools for a task

@@ -1,9 +1,8 @@
 import { Log } from "@/util/log"
 import { Config } from "@/config/config"
-import { getImageAnalyzer, type ImageFeature, type ImageAnalysisResult } from "./image-analyzer"
+import { getImageAnalyzer, type ImageFeature } from "./image-analyzer"
 import { getImageMCPRouter, type ImageMCPRouter } from "./image-mcp-router"
-import { getMultimodalSelector, type MultimodalModelSelector, type ModelSelectionResult, type CostBudget } from "@/provider/multimodal-selector"
-import { getModelsCache, type ModelCapability } from "@/provider/models-cache"
+import { getMultimodalSelector, type MultimodalModelSelector, type CostBudget } from "@/provider/multimodal-selector"
 import { Provider } from "@/provider/provider"
 
 const log = Log.create({ service: "image.router" })
@@ -94,7 +93,6 @@ export class ImageRouter {
   private analyzer: ReturnType<typeof getImageAnalyzer>
   private mcpRouter: ImageMCPRouter
   private multimodalSelector: MultimodalModelSelector
-  private modelsCache: ReturnType<typeof getModelsCache>
   private config: ImageUnderstandingConfig | null = null
 
   /**
@@ -104,7 +102,6 @@ export class ImageRouter {
     this.analyzer = getImageAnalyzer()
     this.mcpRouter = getImageMCPRouter()
     this.multimodalSelector = getMultimodalSelector()
-    this.modelsCache = getModelsCache()
   }
 
   /**
@@ -277,8 +274,6 @@ export class ImageRouter {
     if (!strategy.mcpToolName || !strategy.mcpServerName) {
       throw new Error("Invalid MCP strategy: missing tool or server name")
     }
-
-    const config = await this.loadConfig()
 
     // Prepare image data for MCP tool
     const imageData = features.map((f) => ({
