@@ -65,6 +65,9 @@ export interface SessionStore {
   todo: Record<string, Todo[]>
   permission: Record<string, PermissionRequest[]>
   question: Record<string, QuestionRequest[]>
+  // 添加 message 和 part 字段，因为 SessionContext 需要访问这些数据
+  message: Record<string, Message[]>
+  part: Record<string, Part[]>
 }
 
 export interface MessagesStore {
@@ -156,6 +159,8 @@ export function SessionProvider(props: ParentProps & { children: any; sdk: any; 
     todo: {},
     permission: {},
     question: {},
+    message: {},
+    part: {},
   })
 
   const fullSyncedSessions = new Set<string>()

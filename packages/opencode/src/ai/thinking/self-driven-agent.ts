@@ -1,6 +1,8 @@
 import { SelfDrivingLoop, type SelfDrivingConfig, DEFAULT_SELF_DRIVING_CONFIG } from "./self-driving-loop"
 import type { TaskIntent } from "./intent"
 import { IntentDetection } from "./intent"
+import type { Provider } from "@/provider/provider"
+import { OpencodeLLMAdapter } from "./llm-adapter"
 
 export interface SelfDrivenAgentConfig {
   selfDriving: SelfDrivingConfig
@@ -14,6 +16,8 @@ export interface AgentContext {
     role: "user" | "assistant" | "tool"
     content: string
   }>
+  model: Provider.Model
+  sessionID: string
 }
 
 export interface BeforeLLMResult {
@@ -43,6 +47,10 @@ export class SelfDrivenAgent {
     if (this.initialized) {
       this.loop.reset()
     }
+
+    // Initialize LLM for Thinking
+    const llmAdapter = new OpencodeLLMAdapter(context.model, context.sessionID)
+    this.loop.setLLM(llmAdapter)
 
     const intent = IntentDetection.detect(context.userInput)
     await this.loop.initialize(context.userInput, intent)
@@ -181,6 +189,10 @@ export class SelfDrivenAgent {
 
   shouldRequestUserInput(): boolean {
     return this.loop.shouldRequestUserInput()
+  }
+
+  detectRemainingWork() {
+    return this.loop.detectRemainingWork()
   }
 }
 

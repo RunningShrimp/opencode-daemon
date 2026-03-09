@@ -14,7 +14,10 @@ import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema }
 import { SessionCompaction } from "./compaction"
 import { Instance } from "../project/instance"
 import { Bus } from "../bus"
+import { Todo } from "./todo"
 import { ProviderTransform } from "../provider/transform"
+import { createSelfDrivenAgent, SelfDrivenAgent } from "../ai/thinking/self-driven-agent"
+import { IntentDetection } from "../ai/thinking/intent"
 import { SystemPrompt } from "./system"
 import { InstructionPrompt } from "./instruction"
 import { Plugin } from "../plugin"
@@ -62,7 +65,16 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
 
-  let stateCache: ReturnType<typeof Instance.state> | null = null
+  const selfDrivenAgents = new Map<string, SelfDrivenAgent>()
+
+  function getSelfDrivenAgent(sessionID: string) {
+    if (!selfDrivenAgents.has(sessionID)) {
+      selfDrivenAgents.set(sessionID, createSelfDrivenAgent())
+    }
+    return selfDrivenAgents.get(sessionID)!
+  }
+
+  let stateCache: any = null
 
   const getState = () => {
     if (!stateCache) {
@@ -299,6 +311,8 @@ export namespace SessionPrompt {
     // on the user message and will be retrieved from lastUser below
     let structuredOutput: unknown | undefined
 
+    const sdAgent = getSelfDrivenAgent(sessionID)
+
     let step = 0
     const session = await Session.get(sessionID)
     while (true) {
@@ -308,12 +322,16 @@ export namespace SessionPrompt {
       let msgs = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
 
       let lastUser: MessageV2.User | undefined
+      let lastUserParts: MessageV2.Part[] = []
       let lastAssistant: MessageV2.Assistant | undefined
       let lastFinished: MessageV2.Assistant | undefined
       let tasks: (MessageV2.CompactionPart | MessageV2.SubtaskPart)[] = []
       for (let i = msgs.length - 1; i >= 0; i--) {
         const msg = msgs[i]
-        if (!lastUser && msg.info.role === "user") lastUser = msg.info as MessageV2.User
+        if (!lastUser && msg.info.role === "user") {
+          lastUser = msg.info as MessageV2.User
+          lastUserParts = msg.parts
+        }
         if (!lastAssistant && msg.info.role === "assistant") lastAssistant = msg.info as MessageV2.Assistant
         if (!lastFinished && msg.info.role === "assistant" && msg.info.finish)
           lastFinished = msg.info as MessageV2.Assistant
@@ -325,11 +343,93 @@ export namespace SessionPrompt {
       }
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
-      if (
+      
+      // Initialize Self-Driven Agent if this is a new turn
+      if (lastUser && step === 0) {
+        const userInput = lastUserParts
+          .filter((p) => p.type === "text")
+          .map((p) => (p as MessageV2.TextPart).text)
+          .join("\n")
+        
+        await sdAgent.initialize({
+          userInput,
+          intent: IntentDetection.detect(userInput),
+          history: msgs.map((m) => ({
+            role: m.info.role === "assistant" ? "assistant" : m.info.role === "user" ? "user" : "tool", // approximate mapping
+            content: m.parts.filter((p) => p.type === "text").map((p) => (p as MessageV2.TextPart).text).join("\n")
+          }))
+        })
+      }
+
+      const shouldExit =
         lastAssistant?.finish &&
         !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
         lastUser.id < lastAssistant.id
-      ) {
+
+      if (shouldExit) {
+        // Check for pending todos
+        const todos = await Todo.get(sessionID)
+        const hasPending = todos.some((t) => t.status === "pending" || t.status === "in_progress")
+
+        if (hasPending) {
+          log.info("pending todos found, continuing loop", { sessionID })
+
+          // Create synthetic user message to nudge the agent
+          const nextTodo = todos.find((t) => t.status === "in_progress") || todos.find((t) => t.status === "pending")
+          const reminder = nextTodo
+            ? `You have pending items in your todo list. The next task is: "${nextTodo.content}". Please proceed.`
+            : "You have pending items in your todo list. Please proceed to the next task."
+
+          const summaryUserMsg = (await Session.updateMessage({
+            id: Identifier.ascending("message"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: lastUser.agent,
+            model: lastUser.model,
+          })) as MessageV2.User
+
+          await Session.updatePart({
+            id: Identifier.ascending("part"),
+            messageID: summaryUserMsg.id,
+            sessionID,
+            type: "text",
+            text: `<system-reminder>${reminder}</system-reminder>`,
+            synthetic: true,
+          })
+
+          continue
+        }
+
+        // Check for Self-Driven Agent remaining work
+        const remainingWork = sdAgent.detectRemainingWork()
+        if (remainingWork.hasRemaining && remainingWork.progress < 1.0) {
+           log.info("self-driven agent has remaining work", { sessionID, remaining: remainingWork.items })
+           
+           const nextAction = remainingWork.suggestedActions[0] || "Continue with the next step."
+           const reminder = `Self-Correction: You still have incomplete goals. \nRemaining items: ${remainingWork.items.join(", ")}. \nSuggested action: ${nextAction}`
+
+           const summaryUserMsg = (await Session.updateMessage({
+            id: Identifier.ascending("message"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: lastUser.agent,
+            model: lastUser.model,
+          })) as MessageV2.User
+
+          await Session.updatePart({
+            id: Identifier.ascending("part"),
+            messageID: summaryUserMsg.id,
+            sessionID,
+            type: "text",
+            text: `<system-reminder>${reminder}</system-reminder>`,
+            synthetic: true,
+          })
+
+          continue
+        }
+
         log.info("exiting loop", { sessionID })
         break
       }
@@ -618,6 +718,7 @@ export namespace SessionPrompt {
         processor,
         bypassAgentCheck,
         messages: msgs,
+        sdAgent,
       })
 
       // Inject StructuredOutput tool if JSON schema mode enabled
@@ -660,6 +761,17 @@ export namespace SessionPrompt {
 
       // Build system prompt, adding structured output instruction if needed
       const system = [...(await SystemPrompt.environment(model)), ...(await InstructionPrompt.system())]
+      
+      // Inject Self-Driven Agent Context
+      const thinkingResult = await sdAgent.onBeforeLLMCall()
+      if (thinkingResult.enhancedContext) {
+        const contextStr = JSON.stringify(thinkingResult.enhancedContext, null, 2)
+        system.push(`\n<agent_state>\n${contextStr}\n</agent_state>\n`)
+      }
+      if (thinkingResult.promptGuidance) {
+        system.push(`\n<guidance>\n${thinkingResult.promptGuidance}\n</guidance>\n`)
+      }
+
       const format = lastUser.format ?? { type: "text" }
       if (format.type === "json_schema") {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
@@ -751,6 +863,7 @@ export namespace SessionPrompt {
     processor: SessionProcessor.Info
     bypassAgentCheck: boolean
     messages: MessageV2.WithParts[]
+    sdAgent?: SelfDrivenAgent
   }) {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
@@ -813,6 +926,11 @@ export namespace SessionPrompt {
             },
           )
           const result = await item.execute(args, ctx)
+          
+          if (input.sdAgent) {
+             await input.sdAgent.onAfterToolExecution(item.id, true, JSON.stringify(result))
+          }
+
           const output = {
             ...result,
             attachments: result.attachments?.map((attachment) => ({
@@ -1092,7 +1210,7 @@ export namespace SessionPrompt {
                 ]
               }
               break
-            case "file:":
+            case "file:": {
               log.info("file", { mime: part.mime })
               // have to normalize, symbol search returns absolute paths
               // Decode the pathname since URL constructor doesn't automatically decode it
@@ -1266,6 +1384,7 @@ export namespace SessionPrompt {
                   source: part.source,
                 },
               ]
+            }
           }
         }
 

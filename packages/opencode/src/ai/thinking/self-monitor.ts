@@ -3,10 +3,14 @@ import { z } from "zod"
 export enum AgentState {
   IDLE = "idle",
   THINKING = "thinking",
+  SENSING = "sensing",
+  PERCEIVING = "perceiving",
+  PLANNING = "planning",
   EXECUTING = "executing",
   WAITING = "waiting",
   REFLECTING = "reflecting",
   LEARNING = "learning",
+  ADAPTING = "adapting",
   BLOCKED = "blocked",
   ERROR = "error",
 }

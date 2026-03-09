@@ -5,6 +5,7 @@ import { Instance } from "../project/instance"
 import { Log } from "../util/log"
 import { FileIgnore } from "./ignore"
 import { Config } from "../config/config"
+import { Global } from "../global"
 import path from "path"
 // @ts-ignore
 import { createWrapper } from "@parcel/watcher/wrapper"
@@ -65,6 +66,7 @@ export namespace FileWatcher {
       const subscribe: ParcelWatcher.SubscribeCallback = (err, evts) => {
         if (err) return
         for (const evt of evts) {
+          log.debug("file event", { file: evt.path, type: evt.type })
           if (evt.type === "create") Bus.publish(Event.Updated, { file: evt.path, event: "add" })
           if (evt.type === "update") Bus.publish(Event.Updated, { file: evt.path, event: "change" })
           if (evt.type === "delete") Bus.publish(Event.Updated, { file: evt.path, event: "unlink" })
@@ -76,7 +78,7 @@ export namespace FileWatcher {
 
       if (Flag.OPENCODE_EXPERIMENTAL_FILEWATCHER) {
         const pending = w.subscribe(Instance.directory, subscribe, {
-          ignore: [...FileIgnore.PATTERNS, ...cfgIgnores],
+          ignore: [...FileIgnore.PATTERNS, ...cfgIgnores, Global.Path.log, Global.Path.data, Global.Path.cache],
           backend,
         })
         const sub = await withTimeout(pending, SUBSCRIBE_TIMEOUT_MS).catch((err) => {
