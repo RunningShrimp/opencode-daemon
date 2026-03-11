@@ -8,7 +8,7 @@ import { WorkspaceContext } from "../workspace-context"
 export namespace WorkspaceServer {
   export function App() {
     const session = new Hono()
-      .use(async (c, next) => {
+      .use(async (_c, next) => {
         // Right now, we need handle all requests because we don't
         // have syncing. In the future all GET requests will handled
         // by the control plane

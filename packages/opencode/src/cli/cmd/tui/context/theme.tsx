@@ -317,14 +317,15 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
     onMount(init)
 
     function resolveSystemTheme() {
-      console.log("resolveSystemTheme")
-      renderer
-        .getPalette({
-          size: 16,
-        })
+      const timeoutMs = 3000 // 3 second timeout
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Theme resolve timeout")), timeoutMs),
+      )
+
+      Promise.race([renderer.getPalette({ size: 16 }), timeoutPromise])
         .then((colors) => {
-          console.log(colors.palette)
-          if (!colors.palette[0]) {
+          const palette = (colors as { palette: unknown[] }).palette
+          if (!palette[0]) {
             if (store.active === "system") {
               setStore(
                 produce((draft) => {
@@ -337,12 +338,26 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
           }
           setStore(
             produce((draft) => {
-              draft.themes.system = generateSystem(colors, store.mode)
+              draft.themes.system = generateSystem(
+                colors as unknown as Parameters<typeof generateSystem>[0],
+                store.mode,
+              )
               if (store.active === "system") {
                 draft.ready = true
               }
             }),
           )
+        })
+        .catch(() => {
+          // 确保即使 getPalette 失败也设置 ready = true
+          if (store.active === "system") {
+            setStore(
+              produce((draft) => {
+                draft.active = "opencode"
+                draft.ready = true
+              }),
+            )
+          }
         })
     }
 

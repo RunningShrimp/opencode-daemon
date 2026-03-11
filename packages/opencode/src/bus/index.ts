@@ -26,10 +26,17 @@ export namespace Bus {
     async (entry) => {
       const wildcard = entry.subscriptions.get("*")
       if (!wildcard) return
+      let directory = ""
+      try {
+        directory = Instance.directory
+      } catch {
+        // Context not available during disposal
+        return
+      }
       const event = {
         type: InstanceDisposed.type,
         properties: {
-          directory: Instance.directory,
+          directory,
         },
       }
       for (const sub of [...wildcard]) {
@@ -46,7 +53,7 @@ export namespace Bus {
       type: def.type,
       properties,
     }
-    log.info("publishing", {
+    log.debug("publishing", {
       type: def.type,
     })
     const pending = []
@@ -56,8 +63,14 @@ export namespace Bus {
         pending.push(sub(payload))
       }
     }
+    let directory = ""
+    try {
+      directory = Instance.directory
+    } catch {
+      // Context not available
+    }
     GlobalBus.emit("event", {
-      directory: Instance.directory,
+      directory,
       payload,
     })
     return Promise.all(pending)

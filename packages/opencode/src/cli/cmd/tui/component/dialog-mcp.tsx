@@ -7,6 +7,7 @@ import { useTheme } from "../context/theme"
 import { Keybind } from "@/util/keybind"
 import { TextAttributes } from "@opentui/core"
 import { useSDK } from "@tui/context/sdk"
+import { Log } from "@/util/log"
 
 function Status(props: { enabled: boolean; loading: boolean }) {
   const { theme } = useTheme()
@@ -61,10 +62,12 @@ export function DialogMcp() {
           if (status.data) {
             sync.set("mcp", status.data)
           } else {
-            console.error("Failed to refresh MCP status: no data returned")
+            Log.Default.error("mcp refresh returned no data")
           }
         } catch (error) {
-          console.error("Failed to toggle MCP:", error)
+          Log.Default.error("mcp toggle failed", {
+            error: error instanceof Error ? error.message : String(error),
+          })
         } finally {
           setLoading(null)
         }
@@ -78,7 +81,7 @@ export function DialogMcp() {
       title="MCPs"
       options={options()}
       keybind={keybinds()}
-      onSelect={(option) => {
+      onSelect={() => {
         // Don't close on select, only on escape
       }}
     />

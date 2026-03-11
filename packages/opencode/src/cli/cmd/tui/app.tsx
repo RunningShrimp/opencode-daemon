@@ -3,7 +3,18 @@ import { Clipboard } from "@tui/util/clipboard"
 import { Selection } from "@tui/util/selection"
 import { MouseButton, TextAttributes } from "@opentui/core"
 import { RouteProvider, useRoute } from "@tui/context/route"
-import { Switch, Match, createEffect, untrack, ErrorBoundary, createSignal, onMount, batch, Show, on } from "solid-js"
+import {
+  Switch,
+  Match,
+  createEffect,
+  untrack,
+  ErrorBoundary,
+  createSignal,
+  onMount,
+  onCleanup,
+  batch,
+  on,
+} from "solid-js"
 import { win32DisableProcessedInput, win32FlushInputBuffer, win32InstallCtrlCGuard } from "./win32"
 import { Installation } from "@/installation"
 import { Flag } from "@/flag/flag"
@@ -41,6 +52,7 @@ import { writeHeapSnapshot } from "v8"
 import { PromptRefProvider, usePromptRef } from "./context/prompt"
 import { TuiConfigProvider } from "./context/tui-config"
 import { TuiConfig } from "@/config/tui"
+import { Log } from "@/util/log"
 
 async function getTerminalBackgroundColor(): Promise<"dark" | "light"> {
   // can't set raw mode if not a TTY
@@ -190,7 +202,9 @@ export function tui(input: {
           keyBindings: [{ name: "y", ctrl: true, action: "copy-selection" }],
           onCopySelection: (text) => {
             Clipboard.copy(text).catch((error) => {
-              console.error(`Failed to copy console selection to clipboard: ${error}`)
+              Log.Default.error("console selection copy failed", {
+                error: error instanceof Error ? error.message : String(error),
+              })
             })
           },
         },
@@ -255,10 +269,6 @@ function App() {
     renderer.clearSelection()
   }
   const [terminalTitleEnabled, setTerminalTitleEnabled] = createSignal(kv.get("terminal_title_enabled", true))
-
-  createEffect(() => {
-    console.log(JSON.stringify(route.data))
-  })
 
   // Update terminal window title based on current route and session
   createEffect(() => {
@@ -691,65 +701,87 @@ function App() {
     }
   })
 
-  sdk.event.on(TuiEvent.CommandExecute.type, (evt) => {
-    command.trigger(evt.properties.command)
-  })
+  // 保存事件监听器的取消订阅函数
+  const cleanups: Array<() => void> = []
 
-  sdk.event.on(TuiEvent.ToastShow.type, (evt) => {
-    toast.show({
-      title: evt.properties.title,
-      message: evt.properties.message,
-      variant: evt.properties.variant,
-      duration: evt.properties.duration,
-    })
-  })
+  cleanups.push(
+    sdk.event.on(TuiEvent.CommandExecute.type, (evt) => {
+      command.trigger(evt.properties.command)
+    }),
+  )
 
-  sdk.event.on(TuiEvent.SessionSelect.type, (evt) => {
-    route.navigate({
-      type: "session",
-      sessionID: evt.properties.sessionID,
-    })
-  })
+  cleanups.push(
+    sdk.event.on(TuiEvent.ToastShow.type, (evt) => {
+      toast.show({
+        title: evt.properties.title,
+        message: evt.properties.message,
+        variant: evt.properties.variant,
+        duration: evt.properties.duration,
+      })
+    }),
+  )
 
-  sdk.event.on(SessionApi.Event.Deleted.type, (evt) => {
-    if (route.data.type === "session" && route.data.sessionID === evt.properties.info.id) {
-      route.navigate({ type: "home" })
+  cleanups.push(
+    sdk.event.on(TuiEvent.SessionSelect.type, (evt) => {
+      route.navigate({
+        type: "session",
+        sessionID: evt.properties.sessionID,
+      })
+    }),
+  )
+
+  cleanups.push(
+    sdk.event.on(SessionApi.Event.Deleted.type, (evt) => {
+      if (route.data.type === "session" && route.data.sessionID === evt.properties.info.id) {
+        route.navigate({ type: "home" })
+        toast.show({
+          variant: "info",
+          message: "The current session was deleted",
+        })
+      }
+    }),
+  )
+
+  cleanups.push(
+    sdk.event.on(SessionApi.Event.Error.type, (evt) => {
+      const error = evt.properties.error
+      if (error && typeof error === "object" && error.name === "MessageAbortedError") return
+      const message = (() => {
+        if (!error) return "An error occurred"
+
+        if (typeof error === "object") {
+          const data = error.data
+          if ("message" in data && typeof data.message === "string") {
+            return data.message
+          }
+        }
+        return String(error)
+      })()
+
+      toast.show({
+        variant: "error",
+        message,
+        duration: 5000,
+      })
+    }),
+  )
+
+  cleanups.push(
+    sdk.event.on(Installation.Event.UpdateAvailable.type, (evt) => {
       toast.show({
         variant: "info",
-        message: "The current session was deleted",
+        title: "Update Available",
+        message: `OpenCode v${evt.properties.version} is available. Run 'opencode upgrade' to update manually.`,
+        duration: 10000,
       })
+    }),
+  )
+
+  // 组件卸载时清理所有事件监听器
+  onCleanup(() => {
+    for (const cleanup of cleanups) {
+      cleanup()
     }
-  })
-
-  sdk.event.on(SessionApi.Event.Error.type, (evt) => {
-    const error = evt.properties.error
-    if (error && typeof error === "object" && error.name === "MessageAbortedError") return
-    const message = (() => {
-      if (!error) return "An error occurred"
-
-      if (typeof error === "object") {
-        const data = error.data
-        if ("message" in data && typeof data.message === "string") {
-          return data.message
-        }
-      }
-      return String(error)
-    })()
-
-    toast.show({
-      variant: "error",
-      message,
-      duration: 5000,
-    })
-  })
-
-  sdk.event.on(Installation.Event.UpdateAvailable.type, (evt) => {
-    toast.show({
-      variant: "info",
-      title: "Update Available",
-      message: `OpenCode v${evt.properties.version} is available. Run 'opencode upgrade' to update manually.`,
-      duration: 10000,
-    })
   })
 
   return (

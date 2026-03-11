@@ -1,7 +1,6 @@
 import { Prompt, type PromptRef } from "@tui/component/prompt"
 import { createEffect, createMemo, Match, on, onMount, Show, Switch } from "solid-js"
 import { useTheme } from "@tui/context/theme"
-import { useKeybind } from "@tui/context/keybind"
 import { Logo } from "../component/logo"
 import { Tips } from "../component/tips"
 import { Locale } from "@/util/locale"
@@ -102,8 +101,6 @@ export function Home() {
     ),
   )
   const directory = useDirectory()
-
-  const keybind = useKeybind()
 
   return (
     <>

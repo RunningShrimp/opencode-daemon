@@ -153,8 +153,35 @@ export namespace Share {
       const share = await get(input.share.id)
       if (!share) throw new Errors.NotFound(input.share.id)
       if (share.secret !== input.share.secret) throw new Errors.InvalidSecret(input.share.id)
-      const data = (await readSnapshot(input.share.id)) ?? (await legacy(input.share.id))
-      await writeSnapshot(input.share.id, merge(data, input.data))
+      const promises = []
+      for (const item of input.data) {
+        promises.push(
+          iife(async () => {
+            switch (item.type) {
+              case "session":
+                await Storage.write(["share_data", input.share.id, "session"], item.data)
+                break
+              case "message": {
+                const data = item.data as Message
+                await Storage.write(["share_data", input.share.id, "message", data.id], item.data)
+                break
+              }
+              case "part": {
+                const data = item.data as Part
+                await Storage.write(["share_data", input.share.id, "part", data.messageID, data.id], item.data)
+                break
+              }
+              case "session_diff":
+                await Storage.write(["share_data", input.share.id, "session_diff"], item.data)
+                break
+              case "model":
+                await Storage.write(["share_data", input.share.id, "model"], item.data)
+                break
+            }
+          }),
+        )
+      }
+      await Promise.all(promises)
     },
   )
 

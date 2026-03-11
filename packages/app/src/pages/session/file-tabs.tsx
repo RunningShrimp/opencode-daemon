@@ -234,6 +234,7 @@ export function FileTabContent(props: { tab: string }) {
     if (typeof window === "undefined") return
 
     const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return
       if (tabs().active() !== props.tab) return
       if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return
       if (event.key.toLowerCase() !== "f") return
@@ -365,12 +366,6 @@ export function FileTabContent(props: { tab: string }) {
       x: codeScroll[0]?.scrollLeft ?? event.currentTarget.scrollLeft,
       y: event.currentTarget.scrollTop,
     })
-  }
-
-  const cancelCommenting = () => {
-    const p = path()
-    if (p) file.setSelectedLines(p, null)
-    setNote("commenting", null)
   }
 
   let prev = {

@@ -8,8 +8,57 @@ import type { QuestionAnswer, QuestionRequest } from "@opencode-ai/sdk/v2"
 import { useLanguage } from "@/context/language"
 import { useSDK } from "@/context/sdk"
 
-const cache = new Map<string, { tab: number; answers: QuestionAnswer[]; custom: string[]; customOn: boolean[] }>()
+const MAX_CACHE_SIZE = 100
 
+class LRUCache<K, V> {
+  private readonly maxSize: number
+  private readonly map: Map<K, V>
+
+  constructor(maxSize: number) {
+    this.maxSize = maxSize
+    this.map = new Map<K, V>()
+  }
+
+  get(key: K): V | undefined {
+    const value = this.map.get(key)
+    if (value === undefined) {
+      return undefined
+    }
+    // Mark as recently used by reinserting the key.
+    this.map.delete(key)
+    this.map.set(key, value)
+    return value
+  }
+
+  set(key: K, value: V): void {
+    if (this.map.has(key)) {
+      this.map.delete(key)
+    }
+    this.map.set(key, value)
+    if (this.map.size > this.maxSize) {
+      const firstKey = this.map.keys().next().value
+      if (firstKey !== undefined) {
+        this.map.delete(firstKey)
+      }
+    }
+  }
+
+  has(key: K): boolean {
+    return this.map.has(key)
+  }
+
+  delete(key: K): boolean {
+    return this.map.delete(key)
+  }
+
+  clear(): void {
+    this.map.clear()
+  }
+}
+
+const cache = new LRUCache<string, { tab: number; answers: QuestionAnswer[]; custom: string[]; customOn: boolean[] }>(
+  MAX_CACHE_SIZE,
+)
 export const SessionQuestionDock: Component<{ request: QuestionRequest; onSubmit: () => void }> = (props) => {
   const sdk = useSDK()
   const language = useLanguage()

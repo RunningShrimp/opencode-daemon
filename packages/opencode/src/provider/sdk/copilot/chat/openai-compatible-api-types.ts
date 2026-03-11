@@ -46,6 +46,8 @@ export interface OpenAICompatibleAssistantMessage extends JsonRecord<OpenAICompa
   // Copilot-specific reasoning fields
   reasoning_text?: string
   reasoning_opaque?: string
+  // OpenAI-compatible reasoning fields (used by minimax, zhipuai, deepseek, etc.)
+  reasoning_content?: string
 }
 
 export interface OpenAICompatibleMessageToolCall extends JsonRecord {

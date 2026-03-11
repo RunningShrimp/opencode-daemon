@@ -47,7 +47,6 @@ export namespace ProviderTransform {
   function normalizeMessages(
     msgs: ModelMessage[],
     model: Provider.Model,
-    options: Record<string, unknown>,
   ): ModelMessage[] {
     // Anthropic rejects messages with empty content - filter out empty string messages
     // and remove empty text/reasoning parts from array content
@@ -249,9 +248,9 @@ export namespace ProviderTransform {
     })
   }
 
-  export function message(msgs: ModelMessage[], model: Provider.Model, options: Record<string, unknown>) {
+  export function message(msgs: ModelMessage[], model: Provider.Model, _options: Record<string, unknown>) {
     msgs = unsupportedParts(msgs, model)
-    msgs = normalizeMessages(msgs, model, options)
+    msgs = normalizeMessages(msgs, model)
     if (
       (model.providerID === "anthropic" ||
         model.api.id.includes("anthropic") ||
@@ -337,16 +336,6 @@ export namespace ProviderTransform {
       model.api.id.includes(v),
     )
     const adaptiveEfforts = ["low", "medium", "high", "max"]
-    if (
-      id.includes("deepseek") ||
-      id.includes("minimax") ||
-      id.includes("glm") ||
-      id.includes("mistral") ||
-      id.includes("kimi") ||
-      // TODO: Remove this after models.dev data is fixed to use "kimi-k2.5" instead of "k2p5"
-      id.includes("k2p5")
-    )
-      return {}
 
     // see: https://docs.x.ai/docs/guides/reasoning#control-how-hard-the-model-thinks
     if (id.includes("grok") && id.includes("grok-3-mini")) {

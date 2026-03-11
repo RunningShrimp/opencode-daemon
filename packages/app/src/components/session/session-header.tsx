@@ -112,7 +112,6 @@ const LINUX_APPS = [
   },
 ] as const
 
-type OpenOption = (typeof MAC_APPS)[number] | (typeof WINDOWS_APPS)[number] | (typeof LINUX_APPS)[number]
 type OpenIcon = OpenApp | "file-explorer"
 const OPEN_ICON_BASE = new Set<OpenIcon>(["finder", "vscode", "cursor", "zed"])
 
