@@ -2,7 +2,7 @@ import { Log } from "./log"
 import { Global } from "../global"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import path from "node:path"
-import { $ } from "bun"
+import { BunProc } from "../bun"
 
 const log = Log.create({ service: "module-loader" })
 
@@ -172,28 +172,19 @@ export class ModuleLoader {
       const osFlag = this.platform === "darwin" ? "darwin" : this.platform
       const cpuFlag = this.arch
 
-      let bunPath = process.execPath
+      log.info("using bun path", { bunPath: BunProc.which() })
 
-      if (!bunPath.includes("bun") && !bunPath.includes(".bun")) {
-        const possiblePaths = [
-          process.env.BUN_INSTALL ? `${process.env.BUN_INSTALL}/bin/bun` : null,
-          "/Users/didi/.bun/bin/bun",
-          "/usr/local/bin/bun",
-          "/opt/homebrew/bin/bun",
-          "/home/didi/.bun/bin/bun",
-        ].filter(Boolean) as string[]
-
-        for (const p of possiblePaths) {
-          if (existsSync(p)) {
-            bunPath = p
-            break
-          }
-        }
-      }
-
-      log.info("using bun path", { bunPath })
-
-      await $`${bunPath} add ${name}@${version} ${registryArg} --no-save --cwd=${installDir} --os=${osFlag} --cpu=${cpuFlag}`
+      await BunProc.run(
+        [
+          "add",
+          `${name}@${version}`,
+          registryArg,
+          "--no-save",
+          `--os=${osFlag}`,
+          `--cpu=${cpuFlag}`,
+        ],
+        { cwd: installDir },
+      )
 
       this.metadata.set(name, {
         name,
