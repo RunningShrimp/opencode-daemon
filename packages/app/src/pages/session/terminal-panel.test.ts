@@ -245,3 +245,52 @@ describe("createPresence", () => {
     }
   })
 })
+
+// ============================================================================
+// Task 8: TerminalPanel Component Behavior Tests
+// ============================================================================
+// These tests verify the createEffect-based behaviors in terminal-panel.tsx:
+// - Auto-create terminal when none exists (lines 62-71)
+// - Panel auto-close when last terminal removed (lines 73-82)
+// - Resize handling (lines 47-60)
+// - Focus recovery after terminal closes
+//
+// NOTE: All behaviors use SolidJS createEffect which doesn't trigger properly
+// in HappyDOM test environment. These tests are skipped pending a solution
+// for testing SolidJS reactivity in unit tests.
+// ============================================================================
+
+describe("TerminalPanel behaviors", () => {
+  // TODO: SolidJS createEffect doesn't trigger in HappyDOM test environment
+  // See terminal-panel.tsx lines 62-71 for implementation
+  test.skip("auto-creates terminal when none exists and panel becomes visible", async () => {
+    // Expected behavior: When terminalIDs signal is empty and panel is visible,
+    // createTerminal() should be called once
+  })
+
+  // TODO: SolidJS createEffect doesn't trigger in HappyDOM test environment
+  // See terminal-panel.tsx lines 73-82 for implementation
+  test.skip("auto-closes panel when last terminal is removed", async () => {
+    // Expected behavior: When terminalIDs becomes empty, setPanelOpen(false)
+    // should be called after a short delay
+  })
+
+  // TODO: SolidJS createEffect doesn't trigger in HappyDOM test environment
+  // See terminal-panel.tsx lines 47-60 for implementation
+  test.skip("handles resize correctly with debounce", async () => {
+    // Expected behavior: When panel resizes, sizing.touch() should be called
+    // to trigger terminal resize via onResize callback
+  })
+
+  // TODO: SolidJS createEffect doesn't trigger in HappyDOM test environment
+  // See terminal-panel.tsx lines 84-116 for implementation
+  test.skip("focuses appropriate terminal after one closes", async () => {
+    // Expected behavior: When active terminal closes, focus should move to
+    // remaining terminal (previous or first) with fallback strategies
+  })
+
+  test.skip("focus recovery uses RAF then timer fallback", async () => {
+    // Expected behavior: Focus function tries requestAnimationFrame first,
+    // then setTimeout(50ms) fallback, then pointerdown event dispatch
+  })
+})
