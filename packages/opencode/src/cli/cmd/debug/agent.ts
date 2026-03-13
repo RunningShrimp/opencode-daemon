@@ -1,5 +1,4 @@
 import { EOL } from "os"
-import { basename } from "path"
 import { Agent } from "../../../agent/agent"
 import { Provider } from "../../../provider/provider"
 import { Session } from "../../../session"
@@ -9,6 +8,7 @@ import { ToolRegistry } from "../../../tool/registry"
 import { Instance } from "../../../project/instance"
 import { PermissionNext } from "../../../permission/next"
 import { iife } from "../../../util/iife"
+import { Installation } from "../../../installation"
 import { bootstrap } from "../../bootstrap"
 import { cmd } from "../cmd"
 
@@ -36,7 +36,7 @@ export const AgentCommand = cmd({
       const agent = await Agent.get(agentName)
       if (!agent) {
         process.stderr.write(
-          `Agent ${agentName} not found, run '${basename(process.execPath)} agent list' to get an agent list` + EOL,
+          `Agent ${agentName} not found, run '${Installation.executableName()} agent list' to get an agent list` + EOL,
         )
         process.exit(1)
       }

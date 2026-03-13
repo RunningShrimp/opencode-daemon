@@ -346,14 +346,20 @@ export class MCPSmartRouter {
       this.initialize()
     }
 
+    const existing = this.tools.get(tool.toolId)
+    if (existing) {
+      this.semanticMatcher.removeTool(existing)
+    }
+
     const toolWithDefaults: MCPToolCapability = {
+      ...(existing ?? {}),
       ...tool,
-      responseTimes: tool.responseTimes ?? [],
-      successRates: tool.successRates ?? [],
-      errorRates: tool.errorRates ?? [],
-      tags: tool.tags ?? [],
-      category: tool.category ?? "general",
-      available: tool.available ?? true,
+      responseTimes: existing?.responseTimes ?? tool.responseTimes ?? [],
+      successRates: existing?.successRates ?? tool.successRates ?? [],
+      errorRates: existing?.errorRates ?? tool.errorRates ?? [],
+      tags: tool.tags ?? existing?.tags ?? [],
+      category: tool.category ?? existing?.category ?? "general",
+      available: tool.available ?? existing?.available ?? true,
     }
 
     this.tools.set(toolWithDefaults.toolId, toolWithDefaults)
@@ -372,6 +378,16 @@ export class MCPSmartRouter {
     for (const tool of tools) {
       this.registerTool(tool)
     }
+  }
+
+  syncTools(tools: MCPToolCapability[]): void {
+    const next = new Set(tools.map((tool) => tool.toolId))
+    for (const existing of this.tools.keys()) {
+      if (!next.has(existing)) {
+        this.unregisterTool(existing)
+      }
+    }
+    this.registerTools(tools)
   }
 
   unregisterTool(toolId: string): void {
@@ -631,6 +647,35 @@ export class MCPSmartRouter {
       Array.from(this.tools.values()),
       limit,
     )
+  }
+
+  rankTools(
+    task: string,
+    options: {
+      limit?: number
+      category?: string
+      availableOnly?: boolean
+    } = {},
+  ): MCPToolCapability[] {
+    let candidates = Array.from(this.tools.values())
+
+    if (options.category) {
+      candidates = candidates.filter((tool) => tool.category === options.category)
+    }
+
+    if (options.availableOnly !== false) {
+      candidates = candidates.filter((tool) => tool.available)
+    }
+
+    const scored = this.scoreTools(task, candidates)
+      .sort((a, b) => b.score - a.score)
+      .map((item) => item.tool)
+
+    if (options.limit) {
+      return scored.slice(0, options.limit)
+    }
+
+    return scored
   }
 
   // Warm up tools in background

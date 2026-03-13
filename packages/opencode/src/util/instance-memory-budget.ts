@@ -9,6 +9,9 @@ import { Log } from "@/util/log"
 
 const log = Log.create({ service: "instance-memory-budget" })
 
+const SESSION_TOKEN_MEMORY_FACTOR = 256
+const MIN_SESSION_MEMORY_BYTES = 64 * 1024
+
 /**
  * Maximum number of budget instances to keep in memory.
  * When exceeded, the least recently used instance will be evicted.
@@ -330,3 +333,11 @@ export function getBudget(id: string): InstanceMemoryBudget {
 }
 
 export const globalInstanceBudget = new InstanceMemoryBudget()
+
+export function removeBudget(id: string): void {
+  globalManager.remove(id)
+}
+
+export function estimateSessionMemoryBytes(tokenCount: number): number {
+  return Math.max(MIN_SESSION_MEMORY_BYTES, tokenCount * SESSION_TOKEN_MEMORY_FACTOR)
+}

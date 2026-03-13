@@ -410,7 +410,3 @@ export class ConcurrencyLimiterManager {
   }
 }
 
-/**
- * Global named limiter manager
- */
-export const globalLimiterManager = new ConcurrencyLimiterManager(10)

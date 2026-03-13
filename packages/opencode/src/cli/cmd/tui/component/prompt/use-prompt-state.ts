@@ -1,5 +1,5 @@
-import { createStore } from "solid-js/store"
-import { createEffect, on } from "solid-js"
+import { createStore, produce } from "solid-js/store"
+import { createEffect } from "solid-js"
 import type { PromptInfo } from "../prompt/history"
 
 export interface PromptState {
@@ -10,10 +10,19 @@ export interface PromptState {
   placeholder: number
 }
 
-const PLACEHOLDERS = ["Fix a TODO in codebase", "What is tech stack of this project?", "Fix broken tests"]
-export function usePromptState(sessionID: () => string | undefined, onPromptChange: (state: PromptState) => void) {
+function randomPlaceholder(count: number) {
+  return Math.floor(Math.random() * Math.max(count, 1))
+}
+
+export function usePromptState(
+  sessionID: () => string | undefined,
+  options: {
+    placeholderCount?: number
+  } = {},
+) {
+  const placeholderCount = options.placeholderCount ?? 1
   const [store, setStore] = createStore<PromptState>({
-    placeholder: Math.floor(Math.random() * PLACEHOLDERS.length),
+    placeholder: randomPlaceholder(placeholderCount),
     prompt: {
       input: "",
       parts: [],
@@ -23,18 +32,12 @@ export function usePromptState(sessionID: () => string | undefined, onPromptChan
     interrupt: 0,
   })
 
-  createEffect(
-    on(
-      sessionID,
-      () => {
-        setStore("placeholder", Math.floor(Math.random() * PLACEHOLDERS.length))
-      },
-      { defer: true },
-    ),
-  )
-
-  createEffect(() => {
-    onPromptChange(store)
+  createEffect((previousSessionID?: string) => {
+    const currentSessionID = sessionID()
+    if (previousSessionID !== undefined && currentSessionID !== previousSessionID) {
+      setStore("placeholder", randomPlaceholder(placeholderCount))
+    }
+    return currentSessionID
   })
 
   const reset = () => {
@@ -53,12 +56,36 @@ export function usePromptState(sessionID: () => string | undefined, onPromptChan
     setStore("mode", mode)
   }
 
+  const updatePrompt = (updater: (prompt: PromptInfo) => void) => {
+    setStore("prompt", produce(updater))
+  }
+
+  const setPromptInput = (input: string) => {
+    setStore("prompt", "input", input)
+  }
+
   const setPlaceholder = (placeholder: number) => {
     setStore("placeholder", placeholder)
   }
 
+  const rotatePlaceholder = () => {
+    setStore("placeholder", randomPlaceholder(placeholderCount))
+  }
+
   const setInterrupt = (interrupt: number) => {
     setStore("interrupt", interrupt)
+  }
+
+  const incrementInterrupt = () => {
+    setStore("interrupt", (value) => value + 1)
+  }
+
+  const resetInterrupt = () => {
+    setStore("interrupt", 0)
+  }
+
+  const replaceExtmarkToPartIndex = (value: Map<number, number>) => {
+    setStore("extmarkToPartIndex", value)
   }
 
   const updateExtmarkToPartIndex = (updater: (map: Map<number, number>) => Map<number, number>) => {
@@ -71,8 +98,14 @@ export function usePromptState(sessionID: () => string | undefined, onPromptChan
     reset,
     setPrompt,
     setMode,
+    updatePrompt,
+    setPromptInput,
     setPlaceholder,
+    rotatePlaceholder,
     setInterrupt,
+    incrementInterrupt,
+    resetInterrupt,
+    replaceExtmarkToPartIndex,
     updateExtmarkToPartIndex,
   }
 }

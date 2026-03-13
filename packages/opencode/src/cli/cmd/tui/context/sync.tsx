@@ -30,6 +30,12 @@ import { Log } from "@/util/log"
 import type { Path } from "@opencode-ai/sdk"
 import type { Workspace } from "@opencode-ai/sdk/v2"
 
+const SESSION_MESSAGE_WINDOW = 100
+
+function shouldCapSessionMessages(session?: Session) {
+  return !session?.revert?.messageID
+}
+
 export const { use: useSync, provider: SyncProvider } = createSimpleContext({
   name: "Sync",
   init: () => {
@@ -253,7 +259,8 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
             }),
           )
           const updated = store.message[event.properties.info.sessionID]
-          if (updated.length > 100) {
+          const session = store.session.find((item) => item.id === event.properties.info.sessionID)
+          if (updated.length > SESSION_MESSAGE_WINDOW && shouldCapSessionMessages(session)) {
             const oldest = updated[0]
             batch(() => {
               setStore(
@@ -489,9 +496,10 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         async sync(sessionID: string) {
           if (fullSyncedSessions.has(sessionID)) return
 
-          const [session, messages, todo, diff] = await Promise.all([
-            sdk.client.session.get({ sessionID }, { throwOnError: true }),
-            sdk.client.session.messages({ sessionID, limit: 100 }),
+          const session = await sdk.client.session.get({ sessionID }, { throwOnError: true })
+          const messageLimit = shouldCapSessionMessages(session.data) ? SESSION_MESSAGE_WINDOW : undefined
+          const [messages, todo, diff] = await Promise.all([
+            sdk.client.session.messages({ sessionID, limit: messageLimit }),
             sdk.client.session.todo({ sessionID }),
             sdk.client.session.diff({ sessionID }),
           ])

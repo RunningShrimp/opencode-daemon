@@ -14,6 +14,7 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { ProviderTransform } from "@/provider/transform"
+import { getPredictor, globalManager as compactionPredictorManager } from "@/util/compaction-predictor"
 
 export namespace SessionCompaction {
   const log = Log.create({ service: "session.compaction" })
@@ -29,22 +30,76 @@ export namespace SessionCompaction {
 
   const COMPACTION_BUFFER = 20_000
 
-  export async function isOverflow(input: { tokens: MessageV2.Assistant["tokens"]; model: Provider.Model }) {
+  function tokenCount(tokens: MessageV2.Assistant["tokens"]) {
+    return tokens.total || tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
+  }
+
+  function tokenBreakdown(tokens: MessageV2.Assistant["tokens"]) {
+    return {
+      input: tokens.input + tokens.cache.read + tokens.cache.write,
+      output: tokens.output + tokens.reasoning,
+      total: tokenCount(tokens),
+    }
+  }
+
+  export async function isOverflow(input: {
+    sessionID?: string
+    tokens: MessageV2.Assistant["tokens"]
+    model: Provider.Model
+  }) {
     const config = await Config.get()
     if (config.compaction?.auto === false) return false
     const context = input.model.limit.context
     if (context === 0) return false
 
-    const count =
-      input.tokens.total ||
-      input.tokens.input + input.tokens.output + input.tokens.cache.read + input.tokens.cache.write
+    const count = tokenCount(input.tokens)
 
     const reserved =
       config.compaction?.reserved ?? Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model))
     const usable = input.model.limit.input
       ? input.model.limit.input - reserved
       : context - ProviderTransform.maxOutputTokens(input.model)
-    return count >= usable
+
+    if (count >= usable) return true
+    if (!input.sessionID) return false
+
+    const breakdown = tokenBreakdown(input.tokens)
+    const prediction = getPredictor(input.sessionID).predict(breakdown.input, breakdown.output, usable)
+    if (prediction.shouldPreempt) {
+      log.info("predictive compaction triggered", {
+        sessionID: input.sessionID,
+        confidence: prediction.confidence,
+        action: prediction.action,
+        reason: prediction.reason,
+      })
+      return true
+    }
+
+    return false
+  }
+
+  export async function recordUsage(input: {
+    sessionID: string
+    tokens: MessageV2.Assistant["tokens"]
+    model: Provider.Model
+  }) {
+    const config = await Config.get()
+    if (config.compaction?.auto === false) return
+    const context = input.model.limit.context
+    if (context === 0) return
+
+    const reserved =
+      config.compaction?.reserved ?? Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model))
+    const usable = input.model.limit.input
+      ? input.model.limit.input - reserved
+      : context - ProviderTransform.maxOutputTokens(input.model)
+
+    const breakdown = tokenBreakdown(input.tokens)
+    getPredictor(input.sessionID).record(breakdown.input, breakdown.output, usable)
+  }
+
+  export function resetPrediction(sessionID: string) {
+    compactionPredictorManager.remove(sessionID)
   }
 
   export const PRUNE_MINIMUM = 20_000
@@ -289,6 +344,7 @@ When constructing the summary, try to stick to this template:
       }
     }
     if (processor.message.error) return "stop"
+    resetPrediction(input.sessionID)
     Bus.publish(Event.Compacted, { sessionID: input.sessionID })
     return "continue"
   }

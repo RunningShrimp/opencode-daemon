@@ -10,7 +10,7 @@ import { useSDK } from "@tui/context/sdk"
 import { useRoute } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
 import { Identifier } from "@/id/id"
-import { createStore, produce } from "solid-js/store"
+import { produce } from "solid-js/store"
 import { useKeybind } from "@tui/context/keybind"
 import { usePromptHistory, type PromptInfo } from "./history"
 import { usePromptStash } from "./stash"
@@ -19,6 +19,7 @@ import { type AutocompleteRef, Autocomplete } from "./autocomplete"
 import { useCommandDialog } from "../dialog-command"
 import { useRenderer } from "@opentui/solid"
 import { Editor } from "@tui/util/editor"
+import { usePromptState } from "./use-prompt-state"
 import { useExit } from "../../context/exit"
 import { Clipboard } from "../../util/clipboard"
 import type { FilePart } from "@opencode-ai/sdk/v2"
@@ -63,6 +64,22 @@ export function Prompt(props: PromptProps) {
   let input: TextareaRenderable
   let anchor: BoxRenderable
   let autocomplete: AutocompleteRef
+
+  const {
+    store,
+    setStore,
+    reset,
+    setPrompt,
+    setMode,
+    updatePrompt,
+    setPromptInput,
+    rotatePlaceholder,
+    incrementInterrupt,
+    resetInterrupt,
+    replaceExtmarkToPartIndex,
+  } = usePromptState(() => props.sessionID, {
+    placeholderCount: Math.max(PLACEHOLDERS.length, SHELL_PLACEHOLDERS.length),
+  })
 
   const keybind = useKeybind()
   const local = useLocal()
@@ -120,33 +137,6 @@ export function Prompt(props: PromptProps) {
     if (!messages) return undefined
     return messages.findLast((m) => m.role === "user")
   })
-
-  const [store, setStore] = createStore<{
-    prompt: PromptInfo
-    mode: "normal" | "shell"
-    extmarkToPartIndex: Map<number, number>
-    interrupt: number
-    placeholder: number
-  }>({
-    placeholder: Math.floor(Math.random() * PLACEHOLDERS.length),
-    prompt: {
-      input: "",
-      parts: [],
-    },
-    mode: "normal",
-    extmarkToPartIndex: new Map(),
-    interrupt: 0,
-  })
-
-  createEffect(
-    on(
-      () => props.sessionID,
-      () => {
-        setStore("placeholder", Math.floor(Math.random() * PLACEHOLDERS.length))
-      },
-      { defer: true },
-    ),
-  )
 
   // Initialize agent/model/variant from last user message when session changes
   let syncedSessionID: string | undefined
@@ -223,22 +213,22 @@ export function Prompt(props: PromptProps) {
           if (!input.focused) return
           // TODO: this should be its own command
           if (store.mode === "shell") {
-            setStore("mode", "normal")
+            setMode("normal")
             return
           }
           if (!props.sessionID) return
 
-          setStore("interrupt", store.interrupt + 1)
+          incrementInterrupt()
 
           setTimeout(() => {
-            setStore("interrupt", 0)
+            resetInterrupt()
           }, 5000)
 
           if (store.interrupt >= 2) {
             sdk.client.session.abort({
               sessionID: props.sessionID,
             })
-            setStore("interrupt", 0)
+            resetInterrupt()
           }
           dialog.clear()
         },
@@ -320,7 +310,7 @@ export function Prompt(props: PromptProps) {
             })
             .filter((part) => part !== null)
 
-          setStore("prompt", {
+          setPrompt({
             input: content,
             // keep only the non-text parts because the text parts were
             // already expanded inline
@@ -342,7 +332,7 @@ export function Prompt(props: PromptProps) {
             <DialogSkill
               onSelect={(skill) => {
                 input.setText(`/${skill} `)
-                setStore("prompt", {
+                setPrompt({
                   input: `/${skill} `,
                   parts: [],
                 })
@@ -370,18 +360,14 @@ export function Prompt(props: PromptProps) {
     },
     set(prompt) {
       input.setText(prompt.input)
-      setStore("prompt", prompt)
+      setPrompt(prompt)
       restoreExtmarksFromParts(prompt.parts)
       input.gotoBufferEnd()
     },
     reset() {
       input.clear()
       input.extmarks.clear()
-      setStore("prompt", {
-        input: "",
-        parts: [],
-      })
-      setStore("extmarkToPartIndex", new Map())
+      reset()
     },
     submit() {
       submit()
@@ -395,7 +381,7 @@ export function Prompt(props: PromptProps) {
 
   function restoreExtmarksFromParts(parts: PromptInfo["parts"]) {
     input.extmarks.clear()
-    setStore("extmarkToPartIndex", new Map())
+    replaceExtmarkToPartIndex(new Map())
 
     parts.forEach((part, partIndex) => {
       let start = 0
@@ -485,8 +471,7 @@ export function Prompt(props: PromptProps) {
         })
         input.extmarks.clear()
         input.clear()
-        setStore("prompt", { input: "", parts: [] })
-        setStore("extmarkToPartIndex", new Map())
+        reset()
         dialog.clear()
       },
     },
@@ -499,7 +484,7 @@ export function Prompt(props: PromptProps) {
         const entry = stash.pop()
         if (entry) {
           input.setText(entry.input)
-          setStore("prompt", { input: entry.input, parts: entry.parts })
+          setPrompt({ input: entry.input, parts: entry.parts })
           restoreExtmarksFromParts(entry.parts)
           input.gotoBufferEnd()
         }
@@ -516,7 +501,7 @@ export function Prompt(props: PromptProps) {
           <DialogStash
             onSelect={(entry) => {
               input.setText(entry.input)
-              setStore("prompt", { input: entry.input, parts: entry.parts })
+              setPrompt({ input: entry.input, parts: entry.parts })
               restoreExtmarksFromParts(entry.parts)
               input.gotoBufferEnd()
             }}
@@ -542,11 +527,7 @@ export function Prompt(props: PromptProps) {
 
     if (slashName && command.triggerSlash(slashName)) {
       input.extmarks.clear()
-      setStore("prompt", {
-        input: "",
-        parts: [],
-      })
-      setStore("extmarkToPartIndex", new Map())
+      reset()
       input.clear()
       return
     }
@@ -613,7 +594,7 @@ export function Prompt(props: PromptProps) {
         },
         command: inputText,
       })
-      setStore("mode", "normal")
+      setMode("normal")
     } else if (
       inputText.startsWith("/") &&
       iife(() => {
@@ -706,11 +687,7 @@ export function Prompt(props: PromptProps) {
       mode: currentMode,
     })
     input.extmarks.clear()
-    setStore("prompt", {
-      input: "",
-      parts: [],
-    })
-    setStore("extmarkToPartIndex", new Map())
+    reset()
     props.onSubmit?.()
 
     // temporary hack to make sure the message is sent
@@ -852,7 +829,7 @@ export function Prompt(props: PromptProps) {
         anchor={() => anchor}
         input={() => input}
         setPrompt={(cb) => {
-          setStore("prompt", produce(cb))
+          updatePrompt(cb)
         }}
         setExtmark={(partIndex, extmarkId) => {
           setStore("extmarkToPartIndex", (map: Map<number, number>) => {
@@ -892,7 +869,7 @@ export function Prompt(props: PromptProps) {
               maxHeight={6}
               onContentChange={() => {
                 const value = input.plainText
-                setStore("prompt", "input", value)
+                setPromptInput(value)
                 autocomplete.onInput(value)
                 syncExtmarksWithPromptParts()
               }}
@@ -922,11 +899,7 @@ export function Prompt(props: PromptProps) {
                 if (keybind.match("input_clear", e) && store.prompt.input !== "") {
                   input.clear()
                   input.extmarks.clear()
-                  setStore("prompt", {
-                    input: "",
-                    parts: [],
-                  })
-                  setStore("extmarkToPartIndex", new Map())
+                  reset()
                   return
                 }
                 if (keybind.match("app_exit", e)) {
@@ -938,14 +911,14 @@ export function Prompt(props: PromptProps) {
                   }
                 }
                 if (e.name === "!" && input.visualCursor.offset === 0) {
-                  setStore("placeholder", Math.floor(Math.random() * SHELL_PLACEHOLDERS.length))
-                  setStore("mode", "shell")
+                  rotatePlaceholder()
+                  setMode("shell")
                   e.preventDefault()
                   return
                 }
                 if (store.mode === "shell") {
                   if ((e.name === "backspace" && input.visualCursor.offset === 0) || e.name === "escape") {
-                    setStore("mode", "normal")
+                    setMode("normal")
                     e.preventDefault()
                     return
                   }
@@ -961,8 +934,8 @@ export function Prompt(props: PromptProps) {
 
                     if (item) {
                       input.setText(item.input)
-                      setStore("prompt", item)
-                      setStore("mode", item.mode ?? "normal")
+                      setPrompt(item)
+                      setMode(item.mode ?? "normal")
                       restoreExtmarksFromParts(item.parts)
                       e.preventDefault()
                       if (direction === -1) input.cursorOffset = 0

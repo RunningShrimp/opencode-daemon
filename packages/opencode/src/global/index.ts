@@ -5,11 +5,13 @@ import os from "os"
 import { Filesystem } from "../util/filesystem"
 
 const app = "opencode"
+const logApp = "opencoded"
 
 const data = path.join(xdgData!, app)
 const cache = path.join(xdgCache!, app)
 const config = path.join(xdgConfig!, app)
 const state = path.join(xdgState!, app)
+const log = path.join(xdgState!, logApp, "log")
 
 export namespace Global {
   export const Path = {
@@ -19,7 +21,7 @@ export namespace Global {
     },
     data,
     bin: path.join(data, "bin"),
-    log: path.join(data, "log"),
+    log,
     cache,
     config,
     state,

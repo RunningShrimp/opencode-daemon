@@ -19,7 +19,13 @@ interface UninstallArgs {
 interface RemovalTargets {
   directories: Array<{ path: string; label: string; keep: boolean }>
   shellConfig: string | null
-  binary: string | null
+  binaries: string[]
+}
+
+const INSTALL_PATH_MARKERS = [".opencode/bin", ".local/bin"]
+
+function referencesInstallPath(input: string) {
+  return INSTALL_PATH_MARKERS.some((marker) => input.includes(marker))
 }
 
 export const UninstallCommand = {
@@ -93,12 +99,13 @@ async function collectRemovalTargets(args: UninstallArgs, method: Installation.M
     { path: Global.Path.cache, label: "Cache", keep: false },
     { path: Global.Path.config, label: "Config", keep: args.keepConfig },
     { path: Global.Path.state, label: "State", keep: false },
+    { path: Global.Path.log, label: "Logs", keep: false },
   ]
 
   const shellConfig = method === "curl" ? await getShellConfigFile() : null
-  const binary = method === "curl" ? process.execPath : null
+  const binaries = method === "curl" ? Installation.executablePaths() : []
 
-  return { directories, shellConfig, binary }
+  return { directories, shellConfig, binaries }
 }
 
 async function showRemovalSummary(targets: RemovalTargets, method: Installation.Method) {
@@ -119,8 +126,8 @@ async function showRemovalSummary(targets: RemovalTargets, method: Installation.
     prompts.log.info(`  ${prefix} ${dir.label}: ${shortenPath(dir.path)} ${UI.Style.TEXT_DIM}(${sizeStr})${status}`)
   }
 
-  if (targets.binary) {
-    prompts.log.info(`  ✓ Binary: ${shortenPath(targets.binary)}`)
+  for (const binary of targets.binaries) {
+    prompts.log.info(`  ✓ Binary: ${shortenPath(binary)}`)
   }
 
   if (targets.shellConfig) {
@@ -209,12 +216,14 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
     }
   }
 
-  if (method === "curl" && targets.binary) {
+  if (method === "curl" && targets.binaries.length > 0) {
     UI.empty()
-    prompts.log.message("To finish removing the binary, run:")
-    prompts.log.info(`  rm "${targets.binary}"`)
+    prompts.log.message("To finish removing the binary files, run:")
+    for (const binary of targets.binaries) {
+      prompts.log.info(`  rm "${binary}"`)
+    }
 
-    const binDir = path.dirname(targets.binary)
+    const binDir = path.dirname(targets.binaries[0])
     if (binDir.includes(".opencode")) {
       prompts.log.info(`  rmdir "${binDir}" 2>/dev/null`)
     }
@@ -266,7 +275,7 @@ async function getShellConfigFile(): Promise<string | null> {
     if (!exists) continue
 
     const content = await Filesystem.readText(file).catch(() => "")
-    if (content.includes("# opencode") || content.includes(".opencode/bin")) {
+    if (content.includes("# opencode") || referencesInstallPath(content)) {
       return file
     }
   }
@@ -291,14 +300,14 @@ async function cleanShellConfig(file: string) {
 
     if (skip) {
       skip = false
-      if (trimmed.includes(".opencode/bin") || trimmed.includes("fish_add_path")) {
+      if (referencesInstallPath(trimmed) || trimmed.includes("fish_add_path")) {
         continue
       }
     }
 
     if (
-      (trimmed.startsWith("export PATH=") && trimmed.includes(".opencode/bin")) ||
-      (trimmed.startsWith("fish_add_path") && trimmed.includes(".opencode"))
+      (trimmed.startsWith("export PATH=") && referencesInstallPath(trimmed)) ||
+      (trimmed.startsWith("fish_add_path") && referencesInstallPath(trimmed))
     ) {
       continue
     }

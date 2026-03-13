@@ -1,5 +1,5 @@
 import { Log } from "@/util/log"
-import { MCPSmartRouter, getGlobalMCPRouter, type MCPToolCapability, type RoutingDecision } from "@/util/smart-router"
+import { MCPSmartRouter, getGlobalMCPRouter, getMCPRouter, type MCPToolCapability, type RoutingDecision } from "@/util/smart-router"
 import { MCP } from "@/mcp"
 import type { ImageFeature } from "./image-analyzer"
 
@@ -30,71 +30,28 @@ const IMAGE_TASK_KEYWORDS = [
  * by discovering and routing to MCP tools that support image analysis
  */
 export class ImageMCPRouter {
-  private router: MCPSmartRouter
-  private initialized = false
+  private router?: MCPSmartRouter
 
   /**
    * Create a new ImageMCPRouter instance
    * @param router - Optional existing MCPSmartRouter instance to wrap
    */
   constructor(router?: MCPSmartRouter) {
-    this.router = router ?? getGlobalMCPRouter()
+    this.router = router
+  }
+
+  private getRouter(sessionID?: string) {
+    if (this.router) return this.router
+    return sessionID ? getMCPRouter(sessionID) : getGlobalMCPRouter()
   }
 
   /**
    * Initialize the router with available MCP tools
    * This should be called before using the router
    */
-  async initialize(): Promise<void> {
-    if (this.initialized) {
-      return
-    }
-
-    this.router.initialize()
-    await this.registerImageTools()
-    this.initialized = true
-    log.info("ImageMCPRouter initialized")
-  }
-
-  /**
-   * Register all available MCP tools with image-related capabilities
-   */
-  private async registerImageTools(): Promise<void> {
-    try {
-      const mcpTools = await MCP.tools()
-
-      for (const [toolId, tool] of Object.entries(mcpTools)) {
-        // Check if this tool might be related to image processing
-        const toolDescription = tool.description?.toLowerCase() || ""
-        const toolName = toolId.toLowerCase()
-
-        const isImageTool = IMAGE_TASK_KEYWORDS.some(
-          (keyword) => toolDescription.includes(keyword) || toolName.includes(keyword.split(" ")[0]),
-        )
-
-        if (isImageTool) {
-          const mcptoolCapability: MCPToolCapability = {
-            toolId,
-            name: toolId,
-            description: tool.description || "",
-            serverName: this.extractServerName(toolId),
-            serverType: "remote", // Assume remote for now
-            suitableTaskTypes: ["image", "vision", "screenshot", "ocr"],
-            responseTimes: [],
-            successRates: [],
-            errorRates: [],
-            available: true,
-            tags: this.extractImageTags(toolDescription),
-            category: "image",
-          }
-
-          this.router.registerTool(mcptoolCapability)
-          log.debug("registered image tool", { toolId, name: toolId })
-        }
-      }
-    } catch (error) {
-      log.error("failed to register image tools", { error })
-    }
+  async initialize(sessionID?: string): Promise<void> {
+    await MCP.capabilities({ sessionID, preferredCategory: "image" })
+    log.info("ImageMCPRouter initialized", { sessionID })
   }
 
   /**
@@ -133,12 +90,10 @@ export class ImageMCPRouter {
    * Find all MCP tools that could be used for image analysis
    * @returns Array of image-capable MCP tools
    */
-  async findImageTools(): Promise<MCPToolCapability[]> {
-    if (!this.initialized) {
-      await this.initialize()
-    }
+  async findImageTools(sessionID?: string): Promise<MCPToolCapability[]> {
+    await this.initialize(sessionID)
 
-    const allTools = this.router.getAllTools()
+    const allTools = this.getRouter(sessionID).getAllTools()
     return allTools.filter((tool) => {
       // Check if tool has image-related tags or categories
       const hasImageTag = tool.tags.some((tag) =>
@@ -158,14 +113,27 @@ export class ImageMCPRouter {
    * @param task - Description of the image understanding task
    * @returns Routing decision with selected tool and alternatives
    */
-  async routeImageTask(task: string): Promise<RoutingDecision> {
-    if (!this.initialized) {
-      await this.initialize()
-    }
-
-    // Construct a detailed image analysis task description
+  async routeImageTask(task: string, sessionID?: string): Promise<RoutingDecision> {
     const imageTask = `analyze and describe this image: ${task}`
-    const decision = this.router.selectTool(imageTask)
+    await MCP.capabilities({
+      sessionID,
+      task: imageTask,
+      preferredCategory: "image",
+    })
+    const ranked = this.getRouter(sessionID).rankTools(imageTask, {
+      category: "image",
+      limit: 4,
+    })
+    const [selectedTool = null, ...alternatives] = ranked
+    const decision: RoutingDecision = {
+      selectedTool,
+      alternatives,
+      reason: selectedTool
+        ? `Selected image MCP tool \"${selectedTool.name}\" for task \"${task}\"`
+        : `No suitable image MCP tool found for \"${task}\"`,
+      confidence: selectedTool ? 0.9 : 0,
+      strategy: "direct",
+    }
 
     log.info("routed image task", {
       task,
@@ -182,11 +150,7 @@ export class ImageMCPRouter {
    * @param features - Array of image features to analyze
    * @returns Best tool for the task, or null if no suitable tool found
    */
-  async selectBestTool(features: ImageFeature[]): Promise<MCPToolCapability | null> {
-    if (!this.initialized) {
-      await this.initialize()
-    }
-
+  async selectBestTool(features: ImageFeature[], sessionID?: string): Promise<MCPToolCapability | null> {
     // Build task description based on image features
     const mimeType = features[0]?.mimeType || ""
 
@@ -197,7 +161,7 @@ export class ImageMCPRouter {
       task = "analyze photo and describe content"
     }
 
-    const decision = await this.routeImageTask(task)
+    const decision = await this.routeImageTask(task, sessionID)
     return decision.selectedTool
   }
 
@@ -206,12 +170,8 @@ export class ImageMCPRouter {
    * @param primaryTool - The primary selected tool
    * @returns Array of alternative tools
    */
-  async getAlternativeTools(primaryTool: MCPToolCapability): Promise<MCPToolCapability[]> {
-    if (!this.initialized) {
-      await this.initialize()
-    }
-
-    const allImageTools = await this.findImageTools()
+  async getAlternativeTools(primaryTool: MCPToolCapability, sessionID?: string): Promise<MCPToolCapability[]> {
+    const allImageTools = await this.findImageTools(sessionID)
     return allImageTools.filter((tool) => tool.toolId !== primaryTool.toolId)
   }
 
@@ -219,16 +179,16 @@ export class ImageMCPRouter {
    * Check if there are any available MCP image tools
    * @returns true if MCP image tools are available
    */
-  async hasImageTools(): Promise<boolean> {
-    const tools = await this.findImageTools()
+  async hasImageTools(sessionID?: string): Promise<boolean> {
+    const tools = await this.findImageTools(sessionID)
     return tools.length > 0
   }
 
   /**
    * Get router statistics
    */
-  getStats() {
-    return this.router.getStats()
+  getStats(sessionID?: string) {
+    return this.getRouter(sessionID).getStats()
   }
 }
 

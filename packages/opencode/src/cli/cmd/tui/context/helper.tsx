@@ -20,16 +20,17 @@ export function createSimpleContext<T, Props extends Record<string, any>>(input:
   return {
     provider: (props: ParentProps<Props>) => {
       const init = input.init(props)
+      // @ts-expect-error - T may not have 'ready' property
       const shouldRender = () => getReadyValue(init.ready)
 
       return (
-        // @ts-expect-error
         <Show when={shouldRender()}>
           <ctx.Provider value={init}>{props.children}</ctx.Provider>
         </Show>
       )
     },
     use() {
+      // biome-ignore lint/correctness/useHookAtTopLevel: SolidJS useContext in custom hook is valid
       const value = useContext(ctx)
       if (!value) throw new Error(`${input.name} context must be used within a context provider`)
       return value

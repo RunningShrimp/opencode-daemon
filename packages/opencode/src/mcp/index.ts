@@ -23,6 +23,8 @@ import { BusEvent } from "../bus/bus-event"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import open from "open"
+import { withMcpLimit } from "@/util/concurrency-limiter"
+import { getGlobalMCPRouter, getMCPRouter, type MCPToolCapability } from "@/util/smart-router"
 
 export namespace MCP {
   const log = Log.create({ service: "mcp" })
@@ -132,19 +134,203 @@ export namespace MCP {
       description: mcpTool.description ?? "",
       inputSchema: jsonSchema(schema),
       execute: async (args: unknown) => {
-        return client.callTool(
-          {
-            name: mcpTool.name,
-            arguments: (args || {}) as Record<string, unknown>,
-          },
-          CallToolResultSchema,
-          {
-            resetTimeoutOnProgress: true,
-            timeout,
-          },
+        return withMcpLimit(() =>
+          client.callTool(
+            {
+              name: mcpTool.name,
+              arguments: (args || {}) as Record<string, unknown>,
+            },
+            CallToolResultSchema,
+            {
+              resetTimeoutOnProgress: true,
+              timeout,
+            },
+          ),
         )
       },
     })
+  }
+
+  function sanitizeName(value: string) {
+    return value.replace(/[^a-zA-Z0-9_-]/g, "_")
+  }
+
+  function inferToolTags(name: string, description: string) {
+    const text = `${name} ${description}`.toLowerCase()
+    const tags = new Set<string>()
+
+    if (/(image|vision|screenshot|screen capture|photo|picture|ocr|diagram|chart|graph|visual)/.test(text)) {
+      tags.add("image")
+    }
+    if (/(ocr|text extraction|extract text|文字识别)/.test(text)) {
+      tags.add("ocr")
+    }
+    if (/(browser|web|page|url|site|crawl|fetch)/.test(text)) {
+      tags.add("web")
+    }
+    if (/(file|directory|filesystem|read|write|edit)/.test(text)) {
+      tags.add("file")
+    }
+    if (/(search|find|query|lookup)/.test(text)) {
+      tags.add("search")
+    }
+    if (/(run|execute|command|terminal|shell)/.test(text)) {
+      tags.add("execute")
+    }
+
+    return Array.from(tags)
+  }
+
+  function inferTaskTypes(name: string, description: string, tags: string[]) {
+    const text = `${name} ${description}`.toLowerCase()
+    const taskTypes = new Set<string>(tags)
+
+    if (/(analy|inspect|understand|diagnos)/.test(text)) taskTypes.add("analysis")
+    if (/(search|find|lookup|query)/.test(text)) taskTypes.add("search")
+    if (/(image|vision|screenshot|ocr|diagram)/.test(text)) taskTypes.add("image")
+    if (/(debug|error|trace)/.test(text)) taskTypes.add("debugging")
+    if (/(code|repository|github|source)/.test(text)) taskTypes.add("code")
+    if (/(file|directory|filesystem)/.test(text)) taskTypes.add("file")
+
+    return Array.from(taskTypes)
+  }
+
+  function inferCategory(tags: string[], description: string) {
+    const text = description.toLowerCase()
+    if (tags.includes("image")) return "image"
+    if (tags.includes("web")) return "web"
+    if (tags.includes("file")) return "file"
+    if (tags.includes("search")) return "search"
+    if (/(browser|page|site)/.test(text)) return "web"
+    return "general"
+  }
+
+  type ConnectedToolEntry = {
+    clientName: string
+    client: MCPClient
+    mcpTool: MCPToolDef
+    timeout?: number
+    capability: MCPToolCapability
+  }
+
+  export interface ToolOptions {
+    sessionID?: string
+    task?: string
+    preferredCategory?: string
+  }
+
+  function buildCapability(input: {
+    clientName: string
+    mcpTool: MCPToolDef
+    serverType: "local" | "remote"
+  }): MCPToolCapability {
+    const tags = inferToolTags(input.mcpTool.name, input.mcpTool.description ?? "")
+    return {
+      toolId: `${sanitizeName(input.clientName)}_${sanitizeName(input.mcpTool.name)}`,
+      name: input.mcpTool.name,
+      description: input.mcpTool.description ?? "",
+      serverName: input.clientName,
+      serverType: input.serverType,
+      suitableTaskTypes: inferTaskTypes(input.mcpTool.name, input.mcpTool.description ?? "", tags),
+      inputSchema: input.mcpTool.inputSchema as Record<string, unknown> | undefined,
+      responseTimes: [],
+      successRates: [],
+      errorRates: [],
+      available: true,
+      tags,
+      category: inferCategory(tags, input.mcpTool.description ?? ""),
+    }
+  }
+
+  function orderEntries(entries: ConnectedToolEntry[], options: ToolOptions, router: ReturnType<typeof getGlobalMCPRouter>) {
+    if (!options.task && !options.preferredCategory) {
+      return entries
+    }
+
+    const entryMap = new Map(entries.map((entry) => [entry.capability.toolId, entry]))
+    const ordered: ConnectedToolEntry[] = []
+    const seen = new Set<string>()
+
+    const pushCapabilities = (caps: MCPToolCapability[]) => {
+      for (const capability of caps) {
+        const entry = entryMap.get(capability.toolId)
+        if (!entry || seen.has(capability.toolId)) continue
+        seen.add(capability.toolId)
+        ordered.push(entry)
+      }
+    }
+
+    if (options.task) {
+      pushCapabilities(
+        router.rankTools(options.task, {
+          category: options.preferredCategory,
+        }),
+      )
+    }
+
+    if (options.preferredCategory) {
+      pushCapabilities(router.getToolsByCategory(options.preferredCategory))
+    }
+
+    for (const entry of entries) {
+      if (seen.has(entry.capability.toolId)) continue
+      seen.add(entry.capability.toolId)
+      ordered.push(entry)
+    }
+
+    return ordered
+  }
+
+  async function collectConnectedTools(): Promise<ConnectedToolEntry[]> {
+    const entries: ConnectedToolEntry[] = []
+    const s = await state()
+    const cfg = await Config.get()
+    const config = cfg.mcp ?? {}
+    const clientsSnapshot = await clients()
+    const defaultTimeout = cfg.experimental?.mcp_timeout
+
+    const connectedClients = Object.entries(clientsSnapshot).filter(
+      ([clientName]) => s.status[clientName]?.status === "connected",
+    )
+
+    const toolsResults = await Promise.all(
+      connectedClients.map(async ([clientName, client]) => {
+        const toolsResult = await client.listTools().catch((e) => {
+          log.error("failed to get tools", { clientName, error: e.message })
+          const failedStatus = {
+            status: "failed" as const,
+            error: e instanceof Error ? e.message : String(e),
+          }
+          s.status[clientName] = failedStatus
+          delete s.clients[clientName]
+          return undefined
+        })
+        return { clientName, client, toolsResult }
+      }),
+    )
+
+    for (const { clientName, client, toolsResult } of toolsResults) {
+      if (!toolsResult) continue
+      const mcpConfig = config[clientName]
+      const entry = isMcpConfigured(mcpConfig) ? mcpConfig : undefined
+      const timeout = entry?.timeout ?? defaultTimeout
+      const serverType = entry?.type === "remote" ? "remote" : "local"
+      for (const mcpTool of toolsResult.tools) {
+        entries.push({
+          clientName,
+          client,
+          mcpTool,
+          timeout,
+          capability: buildCapability({
+            clientName,
+            mcpTool,
+            serverType,
+          }),
+        })
+      }
+    }
+
+    return entries
   }
 
   // Store transports for OAuth servers to allow finishing auth
@@ -606,45 +792,23 @@ export namespace MCP {
     s.status[name] = { status: "disabled" }
   }
 
-  export async function tools() {
+  export async function capabilities(options: ToolOptions = {}) {
+    const entries = await collectConnectedTools()
+    const router = options.sessionID ? getMCPRouter(options.sessionID) : getGlobalMCPRouter()
+    router.syncTools(entries.map((entry) => entry.capability))
+    return orderEntries(entries, options, router).map((entry) => entry.capability)
+  }
+
+  export async function tools(options: ToolOptions = {}) {
     const result: Record<string, Tool> = {}
-    const s = await state()
-    const cfg = await Config.get()
-    const config = cfg.mcp ?? {}
-    const clientsSnapshot = await clients()
-    const defaultTimeout = cfg.experimental?.mcp_timeout
+    const entries = await collectConnectedTools()
+    const router = options.sessionID ? getMCPRouter(options.sessionID) : getGlobalMCPRouter()
+    router.syncTools(entries.map((entry) => entry.capability))
 
-    const connectedClients = Object.entries(clientsSnapshot).filter(
-      ([clientName]) => s.status[clientName]?.status === "connected",
-    )
-
-    const toolsResults = await Promise.all(
-      connectedClients.map(async ([clientName, client]) => {
-        const toolsResult = await client.listTools().catch((e) => {
-          log.error("failed to get tools", { clientName, error: e.message })
-          const failedStatus = {
-            status: "failed" as const,
-            error: e instanceof Error ? e.message : String(e),
-          }
-          s.status[clientName] = failedStatus
-          delete s.clients[clientName]
-          return undefined
-        })
-        return { clientName, client, toolsResult }
-      }),
-    )
-
-    for (const { clientName, client, toolsResult } of toolsResults) {
-      if (!toolsResult) continue
-      const mcpConfig = config[clientName]
-      const entry = isMcpConfigured(mcpConfig) ? mcpConfig : undefined
-      const timeout = entry?.timeout ?? defaultTimeout
-      for (const mcpTool of toolsResult.tools) {
-        const sanitizedClientName = clientName.replace(/[^a-zA-Z0-9_-]/g, "_")
-        const sanitizedToolName = mcpTool.name.replace(/[^a-zA-Z0-9_-]/g, "_")
-        result[sanitizedClientName + "_" + sanitizedToolName] = await convertMcpTool(mcpTool, client, timeout)
-      }
+    for (const entry of orderEntries(entries, options, router)) {
+      result[entry.capability.toolId] = await convertMcpTool(entry.mcpTool, entry.client, entry.timeout)
     }
+
     return result
   }
 

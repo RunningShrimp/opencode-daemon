@@ -4,6 +4,8 @@ import { getImageAnalyzer, type ImageFeature } from "./image-analyzer"
 import { getImageMCPRouter, type ImageMCPRouter } from "./image-mcp-router"
 import { getMultimodalSelector, type MultimodalModelSelector, type CostBudget } from "@/provider/multimodal-selector"
 import { Provider } from "@/provider/provider"
+import { getGlobalMCPRouter, getMCPRouter } from "@/util/smart-router"
+import { withMcpLimit } from "@/util/concurrency-limiter"
 
 const log = Log.create({ service: "image.router" })
 
@@ -35,6 +37,8 @@ export interface ImageStrategy {
     input: number
     output: number
   }
+  /** Session ID for router metrics */
+  sessionID?: string
 }
 
 /**
@@ -166,15 +170,16 @@ export class ImageRouter {
 
     // Check if MCP tools are preferred and available
     if (config.preferMcp || context.preferMcp) {
-      const hasMcpTools = await this.mcpRouter.hasImageTools()
+      const hasMcpTools = await this.mcpRouter.hasImageTools(context.sessionID)
       if (hasMcpTools) {
-        const bestTool = await this.mcpRouter.selectBestTool(features)
+        const bestTool = await this.mcpRouter.selectBestTool(features, context.sessionID)
         if (bestTool) {
           log.info("selected MCP strategy", { tool: bestTool.name, server: bestTool.serverName })
           return {
             type: "mcp",
             mcpToolName: bestTool.name,
             mcpServerName: bestTool.serverName,
+            sessionID: context.sessionID,
             reason: `Selected MCP tool "${bestTool.name}" for image understanding`,
             confidence: 0.9,
           }
@@ -271,6 +276,9 @@ export class ImageRouter {
       throw new Error("Invalid MCP strategy: missing tool or server name")
     }
 
+    const toolID = `${strategy.mcpServerName.replace(/[^a-zA-Z0-9_-]/g, "_")}_${strategy.mcpToolName.replace(/[^a-zA-Z0-9_-]/g, "_")}`
+    const router = strategy.sessionID ? getMCPRouter(strategy.sessionID) : getGlobalMCPRouter()
+
     // Prepare image data for MCP tool
     const imageData = features.map((f) => ({
       url: f.url,
@@ -295,13 +303,17 @@ export class ImageRouter {
       }
 
       // Call the tool with image data
-      const result = await client.callTool({
-        name: strategy.mcpToolName,
-        arguments: {
-          images: imageData,
-          prompt: prompt || "Describe this image in detail",
-        },
-      })
+      const started = Date.now()
+      const result = await withMcpLimit(() =>
+        client.callTool({
+          name: strategy.mcpToolName,
+          arguments: {
+            images: imageData,
+            prompt: prompt || "Describe this image in detail",
+          },
+        }),
+      )
+      router.recordToolCall(toolID, true, Date.now() - started, strategy.sessionID)
 
       // Extract text content from result
       if (result.content && Array.isArray(result.content)) {
@@ -318,6 +330,7 @@ export class ImageRouter {
       // If no text content, return a generic success message
       return `[Image analysis completed using ${strategy.mcpToolName}]`
     } catch (error) {
+      router.recordToolCall(toolID, false, 0, strategy.sessionID)
       log.error("MCP tool execution failed", {
         tool: strategy.mcpToolName,
         server: strategy.mcpServerName,

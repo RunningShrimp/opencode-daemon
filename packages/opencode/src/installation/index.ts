@@ -1,5 +1,6 @@
 import { BusEvent } from "@/bus/bus-event"
 import path from "path"
+import { existsSync } from "fs"
 import z from "zod"
 import { NamedError } from "@opencode-ai/util/error"
 import { Log } from "../util/log"
@@ -15,6 +16,44 @@ declare global {
 
 export namespace Installation {
   const log = Log.create({ service: "installation" })
+
+  function binaryExt() {
+    return process.platform === "win32" ? ".exe" : ""
+  }
+
+  function officialBinaryName() {
+    return `opencode${binaryExt()}`
+  }
+
+  function compatBinaryName() {
+    return `opencoded${binaryExt()}`
+  }
+
+  export function executablePath() {
+    const execPath = process.execPath
+    const currentName = path.basename(execPath)
+    if (currentName !== compatBinaryName()) return execPath
+
+    const officialPath = path.join(path.dirname(execPath), officialBinaryName())
+    if (existsSync(officialPath)) return officialPath
+    return execPath
+  }
+
+  export function executableName() {
+    return path.basename(executablePath())
+  }
+
+  export function executablePaths() {
+    const current = process.execPath
+    const dir = path.dirname(current)
+    const names = [officialBinaryName(), compatBinaryName()]
+    const found = names
+      .map((name) => path.join(dir, name))
+      .filter((candidate) => existsSync(candidate))
+
+    if (found.length === 0) return [current]
+    return Array.from(new Set(found))
+  }
 
   async function text(cmd: string[], opts: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) {
     return Process.text(cmd, {
@@ -91,9 +130,10 @@ export namespace Installation {
   }
 
   export async function method() {
-    if (process.execPath.includes(path.join(".opencode", "bin"))) return "curl"
-    if (process.execPath.includes(path.join(".local", "bin"))) return "curl"
-    const exec = process.execPath.toLowerCase()
+    const execPath = executablePath()
+    if (execPath.includes(path.join(".opencode", "bin"))) return "curl"
+    if (execPath.includes(path.join(".local", "bin"))) return "curl"
+    const exec = execPath.toLowerCase()
 
     const checks = [
       {
@@ -228,7 +268,7 @@ export namespace Installation {
       stdout: result.stdout.toString(),
       stderr: result.stderr.toString(),
     })
-    await Process.text([process.execPath, "--version"], { nothrow: true })
+    await Process.text([executablePath(), "--version"], { nothrow: true })
   }
 
   export const VERSION = typeof OPENCODE_VERSION === "string" ? OPENCODE_VERSION : "local"

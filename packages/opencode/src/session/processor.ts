@@ -15,6 +15,8 @@ import { Config } from "@/config/config"
 import { SessionCompaction } from "./compaction"
 import { PermissionNext } from "@/permission/next"
 import { Question } from "@/question"
+import { getToolEffectivenessTracker } from "@/util/effectiveness-tracker"
+import { estimateSessionMemoryBytes, getBudget } from "@/util/instance-memory-budget"
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -34,6 +36,11 @@ export namespace SessionProcessor {
     let blocked = false
     let attempt = 0
     let needsCompaction = false
+    const effectiveness = getToolEffectivenessTracker(input.sessionID)
+
+    function toolTaskType() {
+      return input.assistantMessage.mode || input.assistantMessage.agent || "general"
+    }
 
     const result = {
       get message() {
@@ -180,6 +187,8 @@ export namespace SessionProcessor {
                 case "tool-result": {
                   const match = toolcalls[value.toolCallId]
                   if (match && match.state.status === "running") {
+                    const duration = Date.now() - match.state.time.start
+                    effectiveness.recordExecution(match.tool, toolTaskType(), true, duration)
                     await Session.updatePart({
                       ...match,
                       state: {
@@ -204,6 +213,14 @@ export namespace SessionProcessor {
                 case "tool-error": {
                   const match = toolcalls[value.toolCallId]
                   if (match && match.state.status === "running") {
+                    const duration = Date.now() - match.state.time.start
+                    effectiveness.recordExecution(
+                      match.tool,
+                      toolTaskType(),
+                      false,
+                      duration,
+                      value.error instanceof Error ? value.error.message : String(value.error),
+                    )
                     await Session.updatePart({
                       ...match,
                       state: {
@@ -261,6 +278,20 @@ export namespace SessionProcessor {
                     cost: usage.cost,
                   })
                   await Session.updateMessage(input.assistantMessage)
+                  await SessionCompaction.recordUsage({
+                    sessionID: input.sessionID,
+                    tokens: usage.tokens,
+                    model: input.model,
+                  })
+                  const sessionBudget = getBudget(input.sessionID)
+                  const budgetReserved = await sessionBudget.acquire(
+                    input.sessionID,
+                    estimateSessionMemoryBytes(usage.tokens.total || usage.tokens.input + usage.tokens.output + usage.tokens.reasoning + usage.tokens.cache.read + usage.tokens.cache.write),
+                  )
+                  if (!budgetReserved) {
+                    log.warn("session memory budget exceeded", { sessionID: input.sessionID })
+                    needsCompaction = true
+                  }
                   if (snapshot) {
                     const patch = await Snapshot.patch(snapshot)
                     if (patch.files.length) {
@@ -281,7 +312,11 @@ export namespace SessionProcessor {
                   })
                   if (
                     !input.assistantMessage.summary &&
-                    (await SessionCompaction.isOverflow({ tokens: usage.tokens, model: input.model }))
+                    (await SessionCompaction.isOverflow({
+                      sessionID: input.sessionID,
+                      tokens: usage.tokens,
+                      model: input.model,
+                    }))
                   ) {
                     needsCompaction = true
                   }

@@ -81,6 +81,7 @@ import { DialogExportOptions } from "../../ui/dialog-export-options"
 import { formatTranscript } from "../../util/transcript"
 import { UI } from "@/cli/ui.ts"
 import { useTuiConfig } from "../../context/tui-config"
+import { getRenderableRevertState } from "./revert-window"
 
 addDefaultParsers(parsers.parsers)
 
@@ -978,8 +979,7 @@ export function Session() {
     },
   ])
 
-  const revertInfo = createMemo(() => session()?.revert)
-  const revertMessageID = createMemo(() => revertInfo()?.messageID)
+  const revertInfo = createMemo(() => getRenderableRevertState(messages(), session()?.revert))
 
   const revertDiffFiles = createMemo(() => {
     const diffText = revertInfo()?.diff ?? ""
@@ -1007,19 +1007,12 @@ export function Session() {
     }
   })
 
-  const revertRevertedMessages = createMemo(() => {
-    const messageID = revertMessageID()
-    if (!messageID) return []
-    return messages().filter((x) => x.id >= messageID && x.role === "user")
-  })
-
   const revert = createMemo(() => {
     const info = revertInfo()
     if (!info) return
-    if (!info.messageID) return
     return {
       messageID: info.messageID,
-      reverted: revertRevertedMessages(),
+      reverted: info.reverted,
       diff: info.diff,
       diffFiles: revertDiffFiles(),
     }

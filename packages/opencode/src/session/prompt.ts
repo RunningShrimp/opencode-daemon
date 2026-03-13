@@ -17,7 +17,7 @@ import { Bus } from "../bus"
 import { Todo } from "./todo"
 import { ProviderTransform } from "../provider/transform"
 import { createSelfDrivenAgent, SelfDrivenAgent } from "../ai/thinking/self-driven-agent"
-import { IntentDetection } from "../ai/thinking/intent"
+import { IntentDetection, type TaskIntent } from "../ai/thinking/intent"
 import { SystemPrompt } from "./system"
 import { InstructionPrompt } from "./instruction"
 import { Plugin } from "../plugin"
@@ -49,6 +49,9 @@ import { LLM } from "./llm"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
+import { getController, removeController, type Complexity } from "@/util/dynamic-turn-control"
+import { getMCPRouter } from "@/util/smart-router"
+import { removeBudget } from "@/util/instance-memory-budget"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -65,6 +68,46 @@ const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested struc
 
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
+
+  function mapIntentToTurnComplexity(intent: TaskIntent): Complexity {
+    if (intent.type === "implementation") return intent.complexity
+    if (intent.type === "review") return intent.scope === "performance" || intent.scope === "security" ? "complex" : "moderate"
+    if (intent.type === "debugging") return "moderate"
+    if (intent.type === "exploration") return "simple"
+    return "moderate"
+  }
+
+  function tokenCount(tokens: MessageV2.Assistant["tokens"]) {
+    return tokens.total || tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
+  }
+
+  function tokenUsage(tokens: MessageV2.Assistant["tokens"]) {
+    return {
+      input: tokens.input + tokens.cache.read + tokens.cache.write,
+      output: tokens.output + tokens.reasoning,
+      total: tokenCount(tokens),
+    }
+  }
+
+  /** @internal Exported for testing */
+  export function getLoopBoundary(input: {
+    turnControlReady: boolean
+    lastFinished?: Pick<MessageV2.Assistant, "tokens">
+    turnController: { shouldContinue(current: number): { shouldContinue: boolean; reason: string } }
+    step: number
+    maxSteps: number
+  }) {
+    const turnDecision =
+      input.turnControlReady && input.lastFinished?.tokens
+        ? input.turnController.shouldContinue(tokenCount(input.lastFinished.tokens))
+        : undefined
+    const shouldWrapUp = !!turnDecision && !turnDecision.shouldContinue
+    return {
+      turnDecision,
+      shouldWrapUp,
+      isLastStep: input.step >= input.maxSteps || shouldWrapUp,
+    }
+  }
 
   const selfDrivenAgents = new Map<string, SelfDrivenAgent>()
 
@@ -305,7 +348,11 @@ export namespace SessionPrompt {
       })
     }
 
-    using _ = defer(() => cancel(sessionID))
+    using _ = defer(() => {
+      cancel(sessionID)
+      removeController(sessionID)
+      removeBudget(sessionID)
+    })
 
     // Structured output state
     // Note: On session resumption, state is reset but outputFormat is preserved
@@ -313,6 +360,10 @@ export namespace SessionPrompt {
     let structuredOutput: unknown | undefined
 
     const sdAgent = getSelfDrivenAgent(sessionID)
+    const turnController = getController(sessionID)
+    let turnControlComplexity: Complexity = "moderate"
+    let turnControlReady = false
+    let turnControlReminderSent = false
 
     let step = 0
     const session = await Session.get(sessionID)
@@ -351,10 +402,12 @@ export namespace SessionPrompt {
           .filter((p) => p.type === "text")
           .map((p) => (p as MessageV2.TextPart).text)
           .join("\n")
+        const detectedIntent = IntentDetection.detect(userInput)
+        turnControlComplexity = mapIntentToTurnComplexity(detectedIntent)
         
         await sdAgent.initialize({
           userInput,
-          intent: IntentDetection.detect(userInput),
+          intent: detectedIntent,
           history: msgs.map((m) => ({
             role: m.info.role === "assistant" ? "assistant" : m.info.role === "user" ? "user" : "tool", // approximate mapping
             content: m.parts.filter((p) => p.type === "text").map((p) => (p as MessageV2.TextPart).text).join("\n")
@@ -456,6 +509,10 @@ export namespace SessionPrompt {
         }
         throw e
       })
+      if (!turnControlReady) {
+        await turnController.initialize(turnControlComplexity, model.limit.input || model.limit.context || 0)
+        turnControlReady = true
+      }
       const task = tasks.pop()
 
       // pending subtask
@@ -654,7 +711,7 @@ export namespace SessionPrompt {
       if (
         lastFinished &&
         lastFinished.summary !== true &&
-        (await SessionCompaction.isOverflow({ tokens: lastFinished.tokens, model }))
+        (await SessionCompaction.isOverflow({ sessionID, tokens: lastFinished.tokens, model }))
       ) {
         await SessionCompaction.create({
           sessionID,
@@ -668,7 +725,13 @@ export namespace SessionPrompt {
       // normal processing
       const agent = await Agent.get(lastUser.agent)
       const maxSteps = agent.steps ?? Infinity
-      const isLastStep = step >= maxSteps
+      const { turnDecision, isLastStep } = getLoopBoundary({
+        turnControlReady,
+        lastFinished,
+        turnController,
+        step,
+        maxSteps,
+      })
       msgs = await insertReminders({
         messages: msgs,
         agent,
@@ -762,6 +825,19 @@ export namespace SessionPrompt {
 
       // Build system prompt, adding structured output instruction if needed
       const system = [...(await SystemPrompt.environment(model)), ...(await InstructionPrompt.system())]
+      if (turnDecision && !turnDecision.shouldContinue) {
+        turnControlReminderSent = true
+        system.push(
+          [
+            "<turn_control>",
+            `Loop heuristic says to wrap up: ${turnDecision.reason}.`,
+            "Prefer giving a concise final answer or summary instead of starting more tool work unless one more step is strictly necessary.",
+            "</turn_control>",
+          ].join("\n"),
+        )
+      } else {
+        turnControlReminderSent = false
+      }
       
       // Inject Self-Driven Agent Context
       const thinkingResult = await sdAgent.onBeforeLLMCall()
@@ -825,6 +901,7 @@ export namespace SessionPrompt {
       }
 
       if (result === "stop") break
+      turnController.record(!processor.message.error, tokenUsage(processor.message.tokens))
       if (result === "compact") {
         await SessionCompaction.create({
           sessionID,
@@ -868,6 +945,15 @@ export namespace SessionPrompt {
   }) {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
+    const latestUser = input.messages.findLast((msg) => msg.info.role === "user")
+    const currentTask = latestUser?.parts
+      .filter((part): part is MessageV2.TextPart => part.type === "text")
+      .map((part) => part.text)
+      .join("\n")
+      .trim()
+    const prefersImageTools =
+      latestUser?.parts.some((part) => part.type === "file" && part.mime.startsWith("image/")) ?? false
+    const mcpRouter = getMCPRouter(input.session.id)
 
     const context = (args: any, options: ToolCallOptions): Tool.Context => ({
       sessionID: input.session.id,
@@ -956,7 +1042,15 @@ export namespace SessionPrompt {
       })
     }
 
-    for (const [key, item] of Object.entries(await MCP.tools())) {
+    for (
+      const [key, item] of Object.entries(
+        await MCP.tools({
+          sessionID: input.session.id,
+          task: currentTask || undefined,
+          preferredCategory: prefersImageTools ? "image" : undefined,
+        }),
+      )
+    ) {
       const execute = item.execute
       if (!execute) continue
 
@@ -985,7 +1079,15 @@ export namespace SessionPrompt {
           always: ["*"],
         })
 
-        const result = await execute(args, opts)
+        const started = Date.now()
+        let result: Awaited<ReturnType<typeof execute>>
+        try {
+          result = await execute(args, opts)
+          mcpRouter.recordToolCall(key, true, Date.now() - started, ctx.sessionID)
+        } catch (error) {
+          mcpRouter.recordToolCall(key, false, Date.now() - started, ctx.sessionID)
+          throw error
+        }
 
         await Plugin.trigger(
           "tool.execute.after",
