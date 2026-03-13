@@ -1,6 +1,6 @@
 import { createContext, Show, useContext, type ParentProps, type Accessor } from "solid-js"
 
-export function createSimpleContext<T, Props extends Record<string, any>>(input: {
+export function createSimpleContext<T extends { ready?: unknown }, Props extends Record<string, any>>(input: {
   name: string
   init: ((input: Props) => T) | (() => T)
 }) {
@@ -23,13 +23,13 @@ export function createSimpleContext<T, Props extends Record<string, any>>(input:
       const shouldRender = () => getReadyValue(init.ready)
 
       return (
-        // @ts-expect-error
         <Show when={shouldRender()}>
           <ctx.Provider value={init}>{props.children}</ctx.Provider>
         </Show>
       )
     },
-    use() {
+    use(): T {
+      // biome-ignore lint/correctness/useHookAtTopLevel: useContext is at top level of the function, not a component
       const value = useContext(ctx)
       if (!value) throw new Error(`${input.name} context must be used within a context provider`)
       return value
