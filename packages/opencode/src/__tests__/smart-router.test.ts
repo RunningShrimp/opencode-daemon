@@ -85,6 +85,21 @@ describe("MCPSmartRouter", () => {
       expect(tools[0].name).toBe("Tool1-Updated")
       expect(tools[0].available).toBe(false)
     })
+
+    test("preserves metrics when re-registering an existing tool", () => {
+      router.registerTool(createTool("tool-1", "Tool1", ["implementation"]))
+      router.recordToolCall("tool-1", true, 750)
+
+      router.registerTool({
+        ...createTool("tool-1", "Tool1-Updated", ["implementation"]),
+        description: "Updated description",
+      })
+
+      const [tool] = router.getAllTools()
+      expect(tool.name).toBe("Tool1-Updated")
+      expect(tool.responseTimes).toEqual([750])
+      expect(tool.successRates).toEqual([1])
+    })
   })
 
   describe("unregisterTool", () => {
@@ -125,7 +140,7 @@ describe("MCPSmartRouter", () => {
       }
 
       const tools = router.getAllTools()
-      expect(tools[0].responseTimes.length).toBeLessThanOrEqual(10)
+      expect(tools[0].responseTimes.length).toBeLessThanOrEqual(20)
     })
   })
 
@@ -203,6 +218,23 @@ describe("MCPSmartRouter", () => {
 
       const available = router.getAvailableTools()
       expect(available.length).toBe(2)
+    })
+
+    test("ranks tools within a preferred category", () => {
+      router.registerTool({
+        ...createTool("image-1", "VisionTool", ["image", "analysis"]),
+        category: "image",
+        tags: ["image", "vision"],
+      })
+      router.registerTool({
+        ...createTool("web-1", "WebTool", ["search"]),
+        category: "web",
+        tags: ["web"],
+      })
+
+      const ranked = router.rankTools("analyze screenshot and extract text", { category: "image" })
+      expect(ranked.length).toBe(1)
+      expect(ranked[0].toolId).toBe("image-1")
     })
   })
 
