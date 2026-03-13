@@ -202,7 +202,7 @@ MODEL=zhipuai-coding-plan/glm-5 script/tui-validate-tmux.sh
 - [x] Add app-side tests for focus recovery, auto-create, and resize behavior.
 - [x] Run packaged TUI regression for MiniMax-M2.5 and GLM-5.
 - [x] Review optimization-related changes to avoid committing runtime artifacts.
-- [ ] Update docs/specs after wiring is complete.
+- [x] Update docs/specs after wiring is complete.
 
 ## Recommended Execution Order
 
