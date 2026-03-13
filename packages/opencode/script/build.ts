@@ -181,7 +181,7 @@ for (const item of targets) {
       autoloadTsconfig: true,
       autoloadPackageJson: true,
       target: name.replace(pkg.name, "bun") as any,
-      outfile: `dist/${name}/bin/opencoded`,
+      outfile: `dist/${name}/bin/opencode`,
       execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
       windows: {},
     },
@@ -197,6 +197,9 @@ for (const item of targets) {
   })
 
   await $`rm -rf ./dist/${name}/bin/tui`
+  const builtBinary = path.join(dir, `dist/${name}/bin`, item.os === "win32" ? "opencode.exe" : "opencode")
+  const compatBinary = path.join(dir, `dist/${name}/bin`, item.os === "win32" ? "opencoded.exe" : "opencoded")
+  await fs.promises.copyFile(builtBinary, compatBinary)
   await Bun.file(`dist/${name}/package.json`).write(
     JSON.stringify(
       {

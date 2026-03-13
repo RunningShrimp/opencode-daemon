@@ -535,6 +535,22 @@ export function Prompt(props: PromptProps) {
       exit()
       return
     }
+
+    const firstLineEnd = store.prompt.input.indexOf("\n")
+    const firstLine = firstLineEnd === -1 ? store.prompt.input : store.prompt.input.slice(0, firstLineEnd)
+    const slashName = firstLine.startsWith("/") ? firstLine.split(" ")[0].slice(1) : ""
+
+    if (slashName && command.triggerSlash(slashName)) {
+      input.extmarks.clear()
+      setStore("prompt", {
+        input: "",
+        parts: [],
+      })
+      setStore("extmarkToPartIndex", new Map())
+      input.clear()
+      return
+    }
+
     const selectedModel = local.model.current()
     if (!selectedModel) {
       promptModelWarning()
@@ -542,25 +558,6 @@ export function Prompt(props: PromptProps) {
     }
 
     let sessionID = props.sessionID
-    if (sessionID == null) {
-      const res = await sdk.client.session.create({
-        workspaceID: props.workspaceID,
-      })
-
-      if (res.error) {
-        console.log("Creating a session failed:", res.error)
-
-        toast.show({
-          message: "Creating a session failed. Open console for more details.",
-          variant: "error",
-        })
-
-        return
-      }
-
-      sessionID = res.data.id
-    }
-
     const messageID = Identifier.ascending("message")
     let inputText = store.prompt.input
 
@@ -588,6 +585,25 @@ export function Prompt(props: PromptProps) {
     const variant = local.model.variant.current()
 
     if (store.mode === "shell") {
+      if (sessionID == null) {
+        const res = await sdk.client.session.create({
+          workspaceID: props.workspaceID,
+        })
+
+        if (res.error) {
+          console.log("Creating a session failed:", res.error)
+
+          toast.show({
+            message: "Creating a session failed. Open console for more details.",
+            variant: "error",
+          })
+
+          return
+        }
+
+        sessionID = res.data.id
+      }
+
       sdk.client.session.shell({
         sessionID,
         agent: local.agent.current().name,
@@ -601,14 +617,29 @@ export function Prompt(props: PromptProps) {
     } else if (
       inputText.startsWith("/") &&
       iife(() => {
-        const firstLine = inputText.split("\n")[0]
-        const command = firstLine.split(" ")[0].slice(1)
-        return sync.data.command.some((x) => x.name === command)
+        return sync.data.command.some((x) => x.name === slashName)
       })
     ) {
+      if (sessionID == null) {
+        const res = await sdk.client.session.create({
+          workspaceID: props.workspaceID,
+        })
+
+        if (res.error) {
+          console.log("Creating a session failed:", res.error)
+
+          toast.show({
+            message: "Creating a session failed. Open console for more details.",
+            variant: "error",
+          })
+
+          return
+        }
+
+        sessionID = res.data.id
+      }
+
       // Parse command from first line, preserve multi-line content in arguments
-      const firstLineEnd = inputText.indexOf("\n")
-      const firstLine = firstLineEnd === -1 ? inputText : inputText.slice(0, firstLineEnd)
       const [command, ...firstLineArgs] = firstLine.split(" ")
       const restOfInput = firstLineEnd === -1 ? "" : inputText.slice(firstLineEnd + 1)
       const args = firstLineArgs.join(" ") + (restOfInput ? "\n" + restOfInput : "")
@@ -629,6 +660,25 @@ export function Prompt(props: PromptProps) {
           })),
       })
     } else {
+      if (sessionID == null) {
+        const res = await sdk.client.session.create({
+          workspaceID: props.workspaceID,
+        })
+
+        if (res.error) {
+          console.log("Creating a session failed:", res.error)
+
+          toast.show({
+            message: "Creating a session failed. Open console for more details.",
+            variant: "error",
+          })
+
+          return
+        }
+
+        sessionID = res.data.id
+      }
+
       sdk.client.session
         .prompt({
           sessionID,

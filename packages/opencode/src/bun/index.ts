@@ -9,6 +9,7 @@ import { Lock } from "../util/lock"
 import { PackageRegistry } from "./registry"
 import { proxied } from "@/util/proxied"
 import { Process } from "../util/process"
+import { existsSync } from "fs"
 
 export namespace BunProc {
   const log = Log.create({ service: "bun" })
@@ -43,7 +44,17 @@ export namespace BunProc {
   }
 
   export function which() {
-    return process.execPath
+    const execPath = process.execPath
+    const ext = process.platform === "win32" ? ".exe" : ""
+    const compatName = `opencode${ext}`
+    const currentName = path.basename(execPath)
+
+    if (currentName === `opencoded${ext}`) {
+      const compatPath = path.join(path.dirname(execPath), compatName)
+      if (existsSync(compatPath)) return compatPath
+    }
+
+    return execPath
   }
 
   export const InstallFailedError = NamedError.create(

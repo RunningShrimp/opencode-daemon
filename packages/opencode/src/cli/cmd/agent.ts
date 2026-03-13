@@ -1,5 +1,6 @@
 import { cmd } from "./cmd"
 import * as prompts from "@clack/prompts"
+import { bootstrap } from "../bootstrap"
 import { UI } from "../ui"
 import { Global } from "../../global"
 import { Agent } from "../../agent/agent"
@@ -56,9 +57,7 @@ const AgentCreateCommand = cmd({
         describe: "model to use in the format of provider/model",
       }),
   async handler(args) {
-    await Instance.provide({
-      directory: process.cwd(),
-      async fn() {
+    await bootstrap(process.cwd(), async () => {
         const cliPath = args.path
         const cliDescription = args.description
         const cliMode = args.mode as AgentMode | undefined
@@ -220,7 +219,6 @@ const AgentCreateCommand = cmd({
           prompts.log.success(`Agent created: ${filePath}`)
           prompts.outro("Done")
         }
-      },
     })
   },
 })
@@ -229,22 +227,19 @@ const AgentListCommand = cmd({
   command: "list",
   describe: "list all available agents",
   async handler() {
-    await Instance.provide({
-      directory: process.cwd(),
-      async fn() {
-        const agents = await Agent.list()
-        const sortedAgents = agents.sort((a, b) => {
-          if (a.native !== b.native) {
-            return a.native ? -1 : 1
-          }
-          return a.name.localeCompare(b.name)
-        })
-
-        for (const agent of sortedAgents) {
-          process.stdout.write(`${agent.name} (${agent.mode})` + EOL)
-          process.stdout.write(`  ${JSON.stringify(agent.permission, null, 2)}` + EOL)
+    await bootstrap(process.cwd(), async () => {
+      const agents = await Agent.list()
+      const sortedAgents = agents.sort((a, b) => {
+        if (a.native !== b.native) {
+          return a.native ? -1 : 1
         }
-      },
+        return a.name.localeCompare(b.name)
+      })
+
+      for (const agent of sortedAgents) {
+        process.stdout.write(`${agent.name} (${agent.mode})` + EOL)
+        process.stdout.write(`  ${JSON.stringify(agent.permission, null, 2)}` + EOL)
+      }
     })
   },
 })

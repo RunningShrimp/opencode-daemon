@@ -20,11 +20,11 @@ export function createSimpleContext<T, Props extends Record<string, any>>(input:
   return {
     provider: (props: ParentProps<Props>) => {
       const init = input.init(props)
-      // 修复：处理 ready 可以是 getter 函数、直接布尔值或 undefined 的情况
-      const shouldRender = getReadyValue(init.ready)
+      const shouldRender = () => getReadyValue(init.ready)
+
       return (
         // @ts-expect-error
-        <Show when={shouldRender}>
+        <Show when={shouldRender()}>
           <ctx.Provider value={init}>{props.children}</ctx.Provider>
         </Show>
       )

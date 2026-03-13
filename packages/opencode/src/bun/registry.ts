@@ -1,5 +1,7 @@
 import semver from "semver"
 import { text } from "node:stream/consumers"
+import { existsSync } from "fs"
+import path from "path"
 import { Log } from "../util/log"
 import { Process } from "../util/process"
 
@@ -7,7 +9,17 @@ export namespace PackageRegistry {
   const log = Log.create({ service: "bun" })
 
   function which() {
-    return process.execPath
+    const execPath = process.execPath
+    const ext = process.platform === "win32" ? ".exe" : ""
+    const compatName = `opencode${ext}`
+    const currentName = path.basename(execPath)
+
+    if (currentName === `opencoded${ext}`) {
+      const compatPath = path.join(path.dirname(execPath), compatName)
+      if (existsSync(compatPath)) return compatPath
+    }
+
+    return execPath
   }
 
   export async function info(pkg: string, field: string, cwd?: string): Promise<string | null> {

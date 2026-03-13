@@ -12,7 +12,7 @@ describe("TUI uses prompt_async", () => {
       baseUrl: "http://opencode.internal",
       directory: dir,
       fetch: ((input: RequestInfo | URL, init?: RequestInit) => {
-        return Server.App().fetch(new Request(input, init))
+        return Server.Default().fetch(new Request(input, init))
       }) as typeof fetch,
     })
 

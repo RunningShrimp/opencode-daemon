@@ -1,5 +1,5 @@
 import { cmd } from "./cmd"
-import { Duration, Effect, Match, Option } from "@/effect"
+import { Duration, Effect, Match, Option } from "effect"
 import { UI } from "../ui"
 import { runtime } from "@/effect/runtime"
 import { AccountID, AccountService, OrgID, PollExpired, type PollResult } from "@/account/service"
