@@ -13,6 +13,7 @@ import { LSP } from "../lsp"
 import { Filesystem } from "../util/filesystem"
 import DESCRIPTION from "./apply_patch.txt"
 import { File } from "../file"
+import { preloadMainstreamTreeSitterLanguagesInBackground } from "../util/tree-sitter-scope"
 
 const PatchParams = z.object({
   patchText: z.string().describe("The full patch text that describes all changes to be made"),
@@ -42,6 +43,8 @@ export const ApplyPatchTool = Tool.define("apply_patch", {
       }
       throw new Error("apply_patch verification failed: no hunks found")
     }
+
+    void preloadMainstreamTreeSitterLanguagesInBackground()
 
     // Validate file paths and check permissions
     const fileChanges: Array<{
@@ -101,7 +104,7 @@ export const ApplyPatchTool = Tool.define("apply_patch", {
 
           // Apply the update chunks to get new content
           try {
-            const fileUpdate = Patch.deriveNewContentsFromChunks(filePath, hunk.chunks)
+            const fileUpdate = await Patch.deriveNewContentsFromChunksAsync(filePath, hunk.chunks)
             newContent = fileUpdate.content
           } catch (error) {
             throw new Error(`apply_patch verification failed: ${error}`)

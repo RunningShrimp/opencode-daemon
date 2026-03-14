@@ -11,6 +11,8 @@ To make multiple file edits, provide the following:
    - oldString: The text to replace (must match the file contents exactly, including all whitespace and indentation)
    - newString: The edited text to replace the oldString
    - replaceAll: Replace all occurrences of oldString. This parameter is optional and defaults to false.
+   - oldRange: Optional hashline range such as 10#a3f-15#b2c. When present, the edit is limited to that verified block.
+   - syntaxHint: Optional tree-sitter AST hint copied from Read output. When present with oldRange, the edit also revalidates the resolved AST node.
 
 IMPORTANT:
 - All edits are applied in sequence, in the order they are provided
@@ -27,6 +29,9 @@ WARNING:
 - The tool will fail if edits.oldString doesn't match the file contents exactly (including whitespace)
 - The tool will fail if edits.oldString and edits.newString are the same
 - Since edits are applied in sequence, ensure that earlier edits don't affect the text that later edits are trying to find
+- If an edit provides oldRange and the range hashes no longer match, that edit will fail until you re-read the file and refresh the range
+- For supported languages, oldRange edits can also be syntax-scoped via tree-sitter before the replacement is applied
+- `syntaxHint` can be a plain node type or a richer AST signature like `function_definition(first)>compound_statement(echo)`
 
 When making edits:
 - Ensure all edits result in idiomatic, correct code

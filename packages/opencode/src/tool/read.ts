@@ -11,12 +11,23 @@ import { Instance } from "../project/instance"
 import { assertExternalDirectory } from "./external-directory"
 import { InstructionPrompt } from "../session/instruction"
 import { Filesystem } from "../util/filesystem"
+import { computeLineHash } from "../util/hashline"
+import {
+  findTreeSitterSyntaxHints,
+  isTreeSitterLanguageSupported,
+  preloadMainstreamTreeSitterLanguagesInBackground,
+} from "../util/tree-sitter-scope"
 
 const DEFAULT_READ_LIMIT = 2000
 const MAX_LINE_LENGTH = 2000
 const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
 const MAX_BYTES = 50 * 1024
 const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
+const MAX_TREE_SITTER_HINT_BYTES = 256 * 1024
+
+function formatHashlineRange(startLine: number, startContent: string, endLine: number, endContent: string) {
+  return `${startLine}#${computeLineHash(startLine, startContent)}-${endLine}#${computeLineHash(endLine, endContent)}`
+}
 
 export const ReadTool = Tool.define("read", {
   description: DESCRIPTION,
@@ -202,6 +213,37 @@ export const ReadTool = Tool.define("read", {
     const lastReadLine = offset + raw.length - 1
     const nextOffset = lastReadLine + 1
     const truncated = hasMoreLines || truncatedByBytes
+    const hashlineRange =
+      raw.length > 0 ? formatHashlineRange(offset, raw[0], lastReadLine, raw[raw.length - 1]) : undefined
+
+    let syntaxHints: Array<{ range: string; nodeType: string; syntaxSummary: string; syntaxHint: string }> = []
+    if (
+      raw.length > 0 &&
+      Number(stat.size) <= MAX_TREE_SITTER_HINT_BYTES &&
+      isTreeSitterLanguageSupported(filepath)
+    ) {
+      void preloadMainstreamTreeSitterLanguagesInBackground()
+      const fullContent = await Filesystem.readText(filepath)
+      const hints = await findTreeSitterSyntaxHints({
+        filePath: filepath,
+        content: fullContent,
+        startLine: offset,
+        endLine: lastReadLine,
+        limit: 6,
+      })
+      const fullLines = fullContent.split("\n")
+      syntaxHints = hints.map((hint) => ({
+        range: formatHashlineRange(
+          hint.startLine,
+          fullLines[hint.startLine - 1] ?? "",
+          hint.endLine,
+          fullLines[hint.endLine - 1] ?? "",
+        ),
+        nodeType: hint.nodeType,
+        syntaxSummary: hint.syntaxSummary,
+        syntaxHint: hint.syntaxHint,
+      }))
+    }
 
     if (truncatedByBytes) {
       output += `\n\n(Output capped at ${MAX_BYTES_LABEL}. Showing lines ${offset}-${lastReadLine}. Use offset=${nextOffset} to continue.)`
@@ -211,6 +253,14 @@ export const ReadTool = Tool.define("read", {
       output += `\n\n(End of file - total ${totalLines} lines)`
     }
     output += "\n</content>"
+
+    if (hashlineRange) {
+      output += `\n\n<hashline-range>\n${hashlineRange}\n</hashline-range>`
+    }
+
+    if (syntaxHints.length > 0) {
+      output += `\n\n<syntax-hints>\n${syntaxHints.map((item) => `${item.range} ${item.syntaxSummary} | ${item.syntaxHint}`).join("\n")}\n</syntax-hints>`
+    }
 
     // just warms the lsp client
     LSP.touchFile(filepath, false)
@@ -226,6 +276,8 @@ export const ReadTool = Tool.define("read", {
       metadata: {
         preview,
         truncated,
+        hashlineRange,
+        syntaxHints,
         loaded: instructions.map((i) => i.filepath),
       },
     }

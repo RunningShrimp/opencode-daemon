@@ -142,6 +142,31 @@ export class ModuleLoader {
     }
   }
 
+
+  installInBackground(config: ModuleConfig): void {
+    const { name } = config
+
+    if (this.isInstalled(name)) {
+      return
+    }
+
+    const pendingInstall = this.pendingInstalls.get(name)
+    if (pendingInstall) {
+      return
+    }
+
+    const installPromise = this.doInstall(config)
+    this.pendingInstalls.set(name, installPromise)
+
+    installPromise
+      .catch((error) => {
+        log.warn("background module install failed", { name, error: String(error) })
+      })
+      .finally(() => {
+        this.pendingInstalls.delete(name)
+      })
+  }
+
   private async doInstall(config: ModuleConfig): Promise<boolean> {
     const { name, version, downloadUrls } = config
 

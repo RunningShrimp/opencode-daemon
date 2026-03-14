@@ -3,6 +3,15 @@ import * as path from "path"
 import * as fs from "fs/promises"
 import { readFileSync } from "fs"
 import { Log } from "../util/log"
+import { getHashline } from "../util/hashline"
+import {
+  findTreeSitterContextRange,
+  findTreeSitterFragmentMatch,
+  findTreeSitterScopedRange,
+  isTreeSitterLanguageSupported,
+  looksLikeTreeSitterSyntaxHint,
+  matchesTreeSitterSyntaxHint,
+} from "../util/tree-sitter-scope"
 
 export namespace Patch {
   const log = Log.create({ service: "patch" })
@@ -30,6 +39,8 @@ export namespace Patch {
     old_lines: string[]
     new_lines: string[]
     change_context?: string
+    old_range?: string
+    syntax_hint?: string
     is_end_of_file?: boolean
   }
 
@@ -109,10 +120,27 @@ export namespace Patch {
     const chunks: UpdateFileChunk[] = []
     let i = startIdx
 
+    const parseChunkHeader = (header: string) => {
+      const normalized = header.trim().endsWith("@@") ? header.trim().slice(0, -2).trim() : header.trim()
+      if (!normalized) return {}
+
+      const rangeMatch = normalized.match(/^(\d+#[a-f0-9]+-\d+#[a-f0-9]+)(?:\s+(.+))?$/)
+      if (rangeMatch) {
+        return {
+          old_range: rangeMatch[1],
+          syntax_hint: rangeMatch[2]?.trim() || undefined,
+        }
+      }
+
+      return {
+        change_context: normalized,
+      }
+    }
+
     while (i < lines.length && !lines[i].startsWith("***")) {
       if (lines[i].startsWith("@@")) {
-        // Parse context line
-        const contextLine = lines[i].substring(2).trim()
+        // Parse context line / hashline anchor metadata
+        const chunkHeader = parseChunkHeader(lines[i].substring(2))
         i++
 
         const oldLines: string[] = []
@@ -148,7 +176,9 @@ export namespace Patch {
         chunks.push({
           old_lines: oldLines,
           new_lines: newLines,
-          change_context: contextLine || undefined,
+          change_context: chunkHeader.change_context,
+          old_range: chunkHeader.old_range,
+          syntax_hint: chunkHeader.syntax_hint,
           is_end_of_file: isEndOfFile || undefined,
         })
       } else {
@@ -306,6 +336,291 @@ export namespace Patch {
   interface ApplyPatchFileUpdate {
     unified_diff: string
     content: string
+  }
+
+  interface LineScope {
+    startLine: number
+    endLine: number
+  }
+
+  function formatHashlinePatchError(filePath: string, range: string, code?: string, actualHash?: string): Error {
+    if (code === "LINE_NOT_FOUND") {
+      return new Error(`Patch anchor ${range} is outside the current file ${filePath}. Re-read the file and refresh the patch.`)
+    }
+    if (code === "HASH_MISMATCH") {
+      const actual = actualHash ? ` Actual hash: ${actualHash}.` : ""
+      return new Error(`Patch anchor ${range} no longer matches ${filePath}.${actual} Re-read the file and refresh the patch.`)
+    }
+    if (code === "BLOCK_MISMATCH") {
+      return new Error(`Patch anchor ${range} no longer matches the current block in ${filePath}. Re-read the file and refresh the patch.`)
+    }
+    return new Error(`Patch anchor ${range} could not be verified in ${filePath}. Re-read the file and refresh the patch.`)
+  }
+
+  async function resolveChunkScope(
+    filePath: string,
+    originalContent: string,
+    chunk: UpdateFileChunk,
+  ): Promise<LineScope | null> {
+    if (!chunk.old_range) {
+      return null
+    }
+
+    const hashline = getHashline()
+    const range = hashline.parseFormattedRange(chunk.old_range)
+    if (!range) {
+      throw new Error(`Invalid patch anchor format '${chunk.old_range}' in ${filePath}`)
+    }
+
+    const verified = hashline.verifyRange(filePath, range, originalContent)
+    if (!verified.valid) {
+      throw formatHashlinePatchError(filePath, chunk.old_range, verified.code, verified.actualHash)
+    }
+
+    const oldText = chunk.old_lines.join("\n")
+    const syntaxScope = await findTreeSitterScopedRange({
+      filePath,
+      content: originalContent,
+      oldString: oldText,
+      startLine: range.start.line,
+      endLine: range.end.line,
+    })
+
+    if (chunk.syntax_hint && !matchesTreeSitterSyntaxHint(chunk.syntax_hint, syntaxScope)) {
+      if (!syntaxScope && isTreeSitterLanguageSupported(filePath)) {
+        throw new Error(
+          `Patch syntax hint '${chunk.syntax_hint}' could not be resolved in ${filePath} at ${chunk.old_range}. Re-read the file and refresh the patch.`,
+        )
+      }
+      if (syntaxScope) {
+        throw new Error(
+          `Patch syntax hint '${chunk.syntax_hint}' no longer matches ${filePath} at ${chunk.old_range}. Current AST hint is '${syntaxScope.syntaxHint}'. Re-read the file and refresh the patch.`,
+        )
+      }
+    }
+
+    if (syntaxScope) {
+      return {
+        startLine: syntaxScope.startLine,
+        endLine: syntaxScope.endLine,
+      }
+    }
+
+    return {
+      startLine: range.start.line,
+      endLine: range.end.line,
+    }
+  }
+
+  function scopeToIndexes(scope: LineScope | null, totalLines: number) {
+    const startIndex = scope ? Math.max(0, scope.startLine - 1) : 0
+    const endIndex = scope ? Math.min(totalLines - 1, scope.endLine - 1) : totalLines - 1
+    return { startIndex, endIndex }
+  }
+
+  function intersectScopes(base: LineScope | null, next: LineScope): LineScope {
+    if (!base) {
+      return next
+    }
+
+    const startLine = Math.max(base.startLine, next.startLine)
+    const endLine = Math.min(base.endLine, next.endLine)
+    if (startLine > endLine) {
+      throw new Error("AST context does not overlap the current verified patch scope. Re-read the file and refresh the patch.")
+    }
+
+    return { startLine, endLine }
+  }
+
+  async function resolveAstPatternMatch(
+    filePath: string,
+    originalContent: string,
+    pattern: string[],
+    scope: LineScope | null,
+    afterLine: number,
+  ): Promise<number> {
+    if (!isTreeSitterLanguageSupported(filePath) || pattern.length === 0) {
+      return -1
+    }
+
+    const fragment = await findTreeSitterFragmentMatch({
+      filePath,
+      content: originalContent,
+      searchText: pattern.join("\n"),
+      startLine: scope?.startLine,
+      endLine: scope?.endLine,
+      afterLine,
+    })
+    if (!fragment) {
+      return -1
+    }
+
+    const matchedLineCount = fragment.endLine - fragment.startLine + 1
+    if (matchedLineCount !== pattern.length) {
+      return -1
+    }
+
+    return fragment.startLine - 1
+  }
+
+  async function resolveChangeContextScope(
+    filePath: string,
+    originalContent: string,
+    changeContext: string,
+    baseScope: LineScope | null,
+    afterLine: number,
+  ): Promise<LineScope | null> {
+    if (!isTreeSitterLanguageSupported(filePath)) {
+      return null
+    }
+
+    const structuredHint = looksLikeTreeSitterSyntaxHint(changeContext) && /[>(]/.test(changeContext)
+    const maybeAstHint = looksLikeTreeSitterSyntaxHint(changeContext)
+    if (!maybeAstHint) {
+      return null
+    }
+
+    const contextScope = await findTreeSitterContextRange({
+      filePath,
+      content: originalContent,
+      syntaxHint: changeContext,
+      startLine: baseScope?.startLine,
+      endLine: baseScope?.endLine,
+      afterLine,
+    })
+
+    if (!contextScope) {
+      if (structuredHint) {
+        throw new Error(`Failed to find AST context '${changeContext}' in ${filePath}`)
+      }
+      return null
+    }
+
+    return intersectScopes(baseScope, {
+      startLine: contextScope.startLine,
+      endLine: contextScope.endLine,
+    })
+  }
+
+  async function computeReplacementsAsync(
+    originalLines: string[],
+    originalContent: string,
+    filePath: string,
+    chunks: UpdateFileChunk[],
+  ): Promise<Array<[number, number, string[]]>> {
+    const replacements: Array<[number, number, string[]]> = []
+    let lineIndex = 0
+
+    for (const chunk of chunks) {
+      const chunkScope = await resolveChunkScope(filePath, originalContent, chunk)
+      let effectiveScope = chunkScope
+
+      const currentSearchLine = lineIndex + 1
+
+      if (chunk.change_context) {
+        const contextScope = await resolveChangeContextScope(
+          filePath,
+          originalContent,
+          chunk.change_context,
+          effectiveScope,
+          currentSearchLine,
+        )
+        if (contextScope) {
+          effectiveScope = contextScope
+          lineIndex = contextScope.startLine - 1
+        } else {
+          const { startIndex: scopeStart, endIndex: scopeEnd } = scopeToIndexes(effectiveScope, originalLines.length)
+          const scopedLines = effectiveScope ? originalLines.slice(scopeStart, scopeEnd + 1) : originalLines
+          const scopedStart = effectiveScope ? Math.max(lineIndex - scopeStart, 0) : lineIndex
+          const contextIdx = seekSequence(scopedLines, [chunk.change_context], scopedStart)
+          if (contextIdx === -1) {
+            throw new Error(`Failed to find context '${chunk.change_context}' in ${filePath}`)
+          }
+          lineIndex = (effectiveScope ? scopeStart : 0) + contextIdx + 1
+        }
+      }
+
+      const { startIndex: scopeStart, endIndex: scopeEnd } = scopeToIndexes(effectiveScope, originalLines.length)
+      const scopedLines = effectiveScope ? originalLines.slice(scopeStart, scopeEnd + 1) : originalLines
+      const scopedStart = effectiveScope ? Math.max(lineIndex - scopeStart, 0) : lineIndex
+
+      if (chunk.old_lines.length === 0) {
+        const insertionIdx =
+          originalLines.length > 0 && originalLines[originalLines.length - 1] === ""
+            ? originalLines.length - 1
+            : originalLines.length
+        replacements.push([insertionIdx, 0, chunk.new_lines])
+        continue
+      }
+
+      let pattern = chunk.old_lines
+      let newSlice = chunk.new_lines
+      let absoluteFound = await resolveAstPatternMatch(
+        filePath,
+        originalContent,
+        pattern,
+        effectiveScope,
+        lineIndex + 1,
+      )
+      let found = absoluteFound === -1 ? seekSequence(scopedLines, pattern, scopedStart, chunk.is_end_of_file) : absoluteFound - (effectiveScope ? scopeStart : 0)
+
+      if (found === -1 && pattern.length > 0 && pattern[pattern.length - 1] === "") {
+        pattern = pattern.slice(0, -1)
+        if (newSlice.length > 0 && newSlice[newSlice.length - 1] === "") {
+          newSlice = newSlice.slice(0, -1)
+        }
+        absoluteFound = await resolveAstPatternMatch(
+          filePath,
+          originalContent,
+          pattern,
+          effectiveScope,
+          lineIndex + 1,
+        )
+        found = absoluteFound === -1 ? seekSequence(scopedLines, pattern, scopedStart, chunk.is_end_of_file) : absoluteFound - (effectiveScope ? scopeStart : 0)
+      }
+
+      if (found !== -1) {
+        const resolvedFound = absoluteFound === -1 ? (effectiveScope ? scopeStart : 0) + found : absoluteFound
+        replacements.push([resolvedFound, pattern.length, newSlice])
+        lineIndex = resolvedFound + pattern.length
+      } else {
+        throw new Error(`Failed to find expected lines in ${filePath}:\n${chunk.old_lines.join("\n")}`)
+      }
+    }
+
+    replacements.sort((a, b) => a[0] - b[0])
+    return replacements
+  }
+
+  export async function deriveNewContentsFromChunksAsync(
+    filePath: string,
+    chunks: UpdateFileChunk[],
+  ): Promise<ApplyPatchFileUpdate> {
+    let originalContent: string
+    try {
+      originalContent = await fs.readFile(filePath, "utf-8")
+    } catch (error) {
+      throw new Error(`Failed to read file ${filePath}: ${error}`)
+    }
+
+    let originalLines = originalContent.split("\n")
+    if (originalLines.length > 0 && originalLines[originalLines.length - 1] === "") {
+      originalLines.pop()
+    }
+
+    const replacements = await computeReplacementsAsync(originalLines, originalContent, filePath, chunks)
+    let newLines = applyReplacements(originalLines, replacements)
+    if (newLines.length === 0 || newLines[newLines.length - 1] !== "") {
+      newLines.push("")
+    }
+
+    const newContent = newLines.join("\n")
+    const unifiedDiff = generateUnifiedDiff(originalContent, newContent)
+
+    return {
+      unified_diff: unifiedDiff,
+      content: newContent,
+    }
   }
 
   export function deriveNewContentsFromChunks(filePath: string, chunks: UpdateFileChunk[]): ApplyPatchFileUpdate {
@@ -545,7 +860,7 @@ export namespace Patch {
           break
 
         case "update":
-          const fileUpdate = deriveNewContentsFromChunks(hunk.path, hunk.chunks)
+          const fileUpdate = await deriveNewContentsFromChunksAsync(hunk.path, hunk.chunks)
 
           if (hunk.move_path) {
             // Handle file move
@@ -641,7 +956,7 @@ export namespace Patch {
             case "update":
               const updatePath = path.resolve(effectiveCwd, hunk.path)
               try {
-                const fileUpdate = deriveNewContentsFromChunks(updatePath, hunk.chunks)
+                const fileUpdate = await deriveNewContentsFromChunksAsync(updatePath, hunk.chunks)
                 changes.set(resolvedPath, {
                   type: "update",
                   unified_diff: fileUpdate.unified_diff,

@@ -16,6 +16,14 @@ export const MultiEditTool = Tool.define("multiedit", {
           oldString: z.string().describe("The text to replace"),
           newString: z.string().describe("The text to replace it with (must be different from oldString)"),
           replaceAll: z.boolean().optional().describe("Replace all occurrences of oldString (default false)"),
+          oldRange: z
+            .string()
+            .optional()
+            .describe("Optional hashline range like 10#a3f-15#b2c to scope this edit to a verified block"),
+          syntaxHint: z
+            .string()
+            .optional()
+            .describe("Optional tree-sitter AST hint copied from read output to revalidate the scoped syntax node"),
         }),
       )
       .describe("Array of edit operations to perform sequentially on the file"),
@@ -30,6 +38,8 @@ export const MultiEditTool = Tool.define("multiedit", {
           oldString: edit.oldString,
           newString: edit.newString,
           replaceAll: edit.replaceAll,
+          oldRange: edit.oldRange,
+          syntaxHint: edit.syntaxHint,
         },
         ctx,
       )

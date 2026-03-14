@@ -31,3 +31,9 @@ It is important to remember:
 
 - You must include a header with your intended action (Add/Delete/Update)
 - You must prefix new lines with `+` even when creating a new file
+- Update chunks may optionally use `@@ 10#a3f-15#b2c @@` or `@@ 10#a3f-15#b2c function_declaration @@` style headers.
+- When a hashline anchor is present, the patch verifier checks that the file still matches that range before applying changes.
+- When both a hashline anchor and syntax hint are present for a supported language, the patch verifier also re-resolves the containing syntax node and rejects stale patches if that node no longer matches.
+- The syntax hint can be either a plain node type or a richer AST signature copied from `Read`, such as `function_definition(first)>compound_statement(echo)`.
+- `change_context` headers are also AST-aware now: `@@ function_definition(first)>compound_statement(echo) @@` can scope the search to a syntax node instead of only seeking a literal line.
+- Inside an AST-scoped patch, `old_lines` matching also tries tree-sitter fragment matching before falling back to raw line seeking, so repeated text blocks are less likely to bind to the wrong sibling fragment.
