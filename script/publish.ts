@@ -34,6 +34,8 @@ Add highlights before publishing. Delete this section if no highlights.
 
 console.log("=== publishing ===\n")
 
+const skipExternalPublish = process.env.OPENCODE_SKIP_EXTERNAL_PUBLISH === "1"
+
 const pkgjsons = await Array.fromAsync(
   new Bun.Glob("**/package.json").scan({
     absolute: true,
@@ -71,6 +73,13 @@ if (Script.release) {
   await import(`../packages/desktop-electron/scripts/finalize-latest-yml.ts`)
 
   await $`gh release edit v${Script.version} --draft=false --repo ${process.env.GH_REPO}`
+}
+
+if (skipExternalPublish) {
+  console.log("\n=== external publish skipped ===\n")
+  const dir = fileURLToPath(new URL("..", import.meta.url))
+  process.chdir(dir)
+  process.exit(0)
 }
 
 console.log("\n=== cli ===\n")

@@ -1,5 +1,5 @@
 name: publish
-run-name: "${{ format('release {0}', inputs.bump) }}"
+run-name: "${{ format('release {0}', inputs.version || inputs.bump || github.ref_name) }}"
 
 on:
   push:
@@ -22,6 +22,15 @@ on:
         description: "Override version (optional)"
         required: false
         type: string
+      repo:
+        description: "Override release repository (owner/name, optional)"
+        required: false
+        type: string
+      publish_external:
+        description: "Publish npm, container, Homebrew and AUR artifacts"
+        required: false
+        type: boolean
+        default: false
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.version || inputs.bump }}
 
@@ -33,9 +42,9 @@ permissions:
 jobs:
   version:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: github.repository == 'anomalyco/opencode'
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'anomalyco/opencode'
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -60,7 +69,7 @@ jobs:
           OPENCODE_BUMP: ${{ inputs.bump }}
           OPENCODE_VERSION: ${{ inputs.version }}
           OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
-          GH_REPO: ${{ (github.ref_name == 'beta' && 'anomalyco/opencode-beta') || github.repository }}
+          GH_REPO: ${{ inputs.repo || ((github.repository == 'anomalyco/opencode' && github.ref_name == 'beta') && 'anomalyco/opencode-beta') || github.repository }}
     outputs:
       version: ${{ steps.version.outputs.version }}
       release: ${{ steps.version.outputs.release }}
@@ -70,9 +79,9 @@ jobs:
   build-cli:
     needs: version
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    if: github.repository == 'anomalyco/opencode'
+    if: github.event_name == 'workflow_dispatch' || github.repository == 'anomalyco/opencode'
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-tags: true
 
@@ -122,30 +131,40 @@ jobs:
           - host: blacksmith-8vcpu-ubuntu-2404-arm
             target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.settings.host }}
+    env:
+      HAS_APPLE_CODESIGN: ${{ (secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '') && 'true' || 'false' }}
+      HAS_APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH != '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
           fetch-tags: true
 
+      - name: Setup git committer
+        id: committer
+        uses: ./.github/actions/setup-git-committer
+        with:
+          opencode-app-id: ${{ vars.OPENCODE_APP_ID }}
+          opencode-app-secret: ${{ secrets.OPENCODE_APP_SECRET }}
+
       - uses: apple-actions/import-codesign-certs@v2
-        if: ${{ runner.os == 'macOS' }}
+        if: ${{ runner.os == 'macOS' && env.HAS_APPLE_CODESIGN == 'true' }}
         with:
           keychain: build
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
       - name: Verify Certificate
-        if: ${{ runner.os == 'macOS' }}
+        if: ${{ runner.os == 'macOS' && env.HAS_APPLE_CODESIGN == 'true' }}
         run: |
           CERT_INFO=$(security find-identity -v -p codesigning build.keychain | grep "Developer ID Application")
           CERT_ID=$(echo "$CERT_INFO" | awk -F'"' '{print $2}')
-          echo "CERT_ID=$CERT_ID" >> $GITHUB_ENV
+          echo "CERT_ID=$CERT_ID" >> "$GITHUB_ENV"
           echo "Certificate imported."
 
       - name: Setup Apple API Key
-        if: ${{ runner.os == 'macOS' }}
+        if: ${{ runner.os == 'macOS' && env.HAS_APPLE_API_KEY_PATH == 'true' }}
         run: |
-          echo "${{ secrets.APPLE_API_KEY_PATH }}" > $RUNNER_TEMP/apple-api-key.p8
+          echo "${{ secrets.APPLE_API_KEY_PATH }}" > "$RUNNER_TEMP/apple-api-key.p8"
 
       - uses: ./.github/actions/setup-bun
 
@@ -182,7 +201,7 @@ jobs:
           bun ./scripts/prepare.ts
         env:
           OPENCODE_VERSION: ${{ needs.version.outputs.version }}
-          GITHUB_TOKEN: ${{ steps.committer.outputs.token }}
+          GITHUB_TOKEN: ${{ steps.committer.outputs.token || github.token }}
           RUST_TARGET: ${{ matrix.settings.target }}
           GH_TOKEN: ${{ github.token }}
           GITHUB_RUN_ID: ${{ github.run_id }}
@@ -204,13 +223,6 @@ jobs:
       - name: Show tauri-cli version
         if: contains(matrix.settings.host, 'ubuntu')
         run: cargo tauri --version
-
-      - name: Setup git committer
-        id: committer
-        uses: ./.github/actions/setup-git-committer
-        with:
-          opencode-app-id: ${{ vars.OPENCODE_APP_ID }}
-          opencode-app-secret: ${{ secrets.OPENCODE_APP_SECRET }}
 
       - name: Build and upload artifacts
         uses: tauri-apps/tauri-action@390cbe447412ced1303d35abe75287949e43437a
@@ -264,20 +276,23 @@ jobs:
             target: aarch64-unknown-linux-gnu
             platform_flag: --linux
     runs-on: ${{ matrix.settings.host }}
+    env:
+      HAS_APPLE_CODESIGN: ${{ (secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '') && 'true' || 'false' }}
+      HAS_APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH != '' && 'true' || 'false' }}
     # if: github.ref_name == 'beta'
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - uses: apple-actions/import-codesign-certs@v2
-        if: runner.os == 'macOS'
+        if: ${{ runner.os == 'macOS' && env.HAS_APPLE_CODESIGN == 'true' }}
         with:
           keychain: build
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
       - name: Setup Apple API Key
-        if: runner.os == 'macOS'
-        run: echo "${{ secrets.APPLE_API_KEY_PATH }}" > $RUNNER_TEMP/apple-api-key.p8
+        if: ${{ runner.os == 'macOS' && env.HAS_APPLE_API_KEY_PATH == 'true' }}
+        run: echo "${{ secrets.APPLE_API_KEY_PATH }}" > "$RUNNER_TEMP/apple-api-key.p8"
 
       - uses: ./.github/actions/setup-bun
 
@@ -365,12 +380,16 @@ jobs:
       - build-tauri
       - build-electron
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    env:
+      OPENCODE_SKIP_EXTERNAL_PUBLISH: ${{ github.event_name == 'workflow_dispatch' && !inputs.publish_external && '1' || '' }}
+      HAS_AUR_KEY: ${{ secrets.AUR_KEY != '' && 'true' || 'false' }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - uses: ./.github/actions/setup-bun
 
       - name: Login to GitHub Container Registry
+        if: ${{ env.OPENCODE_SKIP_EXTERNAL_PUBLISH != '1' }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -378,12 +397,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up QEMU
+        if: ${{ env.OPENCODE_SKIP_EXTERNAL_PUBLISH != '1' }}
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
+        if: ${{ env.OPENCODE_SKIP_EXTERNAL_PUBLISH != '1' }}
         uses: docker/setup-buildx-action@v3
 
       - uses: actions/setup-node@v4
+        if: ${{ env.OPENCODE_SKIP_EXTERNAL_PUBLISH != '1' }}
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -407,6 +429,7 @@ jobs:
           path: /tmp/latest-yml
 
       - name: Cache apt packages (AUR)
+        if: ${{ env.OPENCODE_SKIP_EXTERNAL_PUBLISH != '1' }}
         uses: actions/cache@v4
         with:
           path: /var/cache/apt/archives
@@ -415,6 +438,7 @@ jobs:
             ${{ runner.os }}-apt-aur-
 
       - name: Setup SSH for AUR
+        if: ${{ env.OPENCODE_SKIP_EXTERNAL_PUBLISH != '1' && env.HAS_AUR_KEY == 'true' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y pacman-package-manager
@@ -434,3 +458,4 @@ jobs:
           GH_REPO: ${{ needs.version.outputs.repo }}
           NPM_CONFIG_PROVENANCE: false
           LATEST_YML_DIR: /tmp/latest-yml
+          OPENCODE_SKIP_EXTERNAL_PUBLISH: ${{ env.OPENCODE_SKIP_EXTERNAL_PUBLISH }}
