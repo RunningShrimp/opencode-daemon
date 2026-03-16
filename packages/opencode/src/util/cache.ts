@@ -259,21 +259,6 @@ export class ManagedCache<T> {
     if (options.jsonDir) {
       this.backends.push(new JsonFileCacheBackend<T>(`json:${options.name}`, options.jsonDir))
     }
-
-    for (const backend of this.backends) {
-      const task = backend.initialize()
-        .then(() => {
-          this.notifyReady()
-        })
-        .catch((error) => {
-          log.warn("cache backend init failed", {
-            cache: options.name,
-            backend: backend.name,
-            error: String(error),
-          })
-        })
-      this.backendInitTasks.set(backend.name, task)
-    }
   }
 
   getName() {
@@ -285,6 +270,7 @@ export class ManagedCache<T> {
   }
 
   onPersistentReady(callback: () => void) {
+    this.ensureBackendsStarted()
     this.readyCallbacks.add(callback)
     if (this.isPersistentReady()) {
       queueMicrotask(callback)
@@ -295,6 +281,7 @@ export class ManagedCache<T> {
   }
 
   async whenPersistentReady() {
+    this.ensureBackendsStarted()
     await Promise.allSettled(this.backendInitTasks.values())
   }
 
@@ -307,6 +294,7 @@ export class ManagedCache<T> {
   }
 
   async get(key: string): Promise<T | undefined> {
+    this.ensureBackendsStarted()
     const cached = this.memory.get(key)
     if (cached !== undefined) {
       return cached
@@ -319,6 +307,7 @@ export class ManagedCache<T> {
   }
 
   async getPersistent(key: string): Promise<T | undefined> {
+    this.ensureBackendsStarted()
     const entry = await this.getPersistentEntry(key)
     if (!entry) return undefined
     this.memory.setEntry(key, entry)
@@ -326,6 +315,7 @@ export class ManagedCache<T> {
   }
 
   async set(key: string, value: T, options?: { ttl?: number }) {
+    this.ensureBackendsStarted()
     const entry: CacheEntry<T> = {
       value,
       timestamp: Date.now(),
@@ -350,6 +340,7 @@ export class ManagedCache<T> {
   }
 
   async delete(key: string) {
+    this.ensureBackendsStarted()
     const deleted = this.memory.delete(key)
     await Promise.all(
       this.backends.map(async (backend) => {
@@ -364,6 +355,7 @@ export class ManagedCache<T> {
   }
 
   async clear() {
+    this.ensureBackendsStarted()
     this.memory.clear()
     this.pendingEntries.clear()
     await Promise.all(
@@ -383,6 +375,24 @@ export class ManagedCache<T> {
 
   getStats(): CacheStats {
     return this.memory.getStats()
+  }
+
+  private ensureBackendsStarted() {
+    for (const backend of this.backends) {
+      if (this.backendInitTasks.has(backend.name)) continue
+      const task = backend.initialize()
+        .then(() => {
+          this.notifyReady()
+        })
+        .catch((error) => {
+          log.warn("cache backend init failed", {
+            cache: this.options.name,
+            backend: backend.name,
+            error: String(error),
+          })
+        })
+      this.backendInitTasks.set(backend.name, task)
+    }
   }
 
   private async getPersistentEntry(key: string) {

@@ -7,6 +7,32 @@ import { Process } from "../util/process"
 export namespace PackageRegistry {
   const log = Log.create({ service: "bun" })
 
+  export function shouldRefreshCachedVersion(latestVersion: string, cachedVersion: string): boolean {
+    const validLatestVersion = semver.valid(latestVersion)
+    if (!validLatestVersion) {
+      log.warn("latest version is invalid, using cached", { latestVersion, cachedVersion })
+      return false
+    }
+
+    const isRange = /[\s^~*xX<>|=]/.test(cachedVersion)
+    if (isRange) {
+      const validRange = semver.validRange(cachedVersion)
+      if (!validRange) {
+        log.warn("cached version range is invalid, forcing refresh", { latestVersion, cachedVersion })
+        return true
+      }
+      return !semver.satisfies(validLatestVersion, validRange)
+    }
+
+    const validCachedVersion = semver.valid(cachedVersion)
+    if (!validCachedVersion) {
+      log.warn("cached version is invalid, forcing refresh", { latestVersion, cachedVersion })
+      return true
+    }
+
+    return semver.lt(validCachedVersion, validLatestVersion)
+  }
+
   function which() {
     const execPath = process.execPath
     const ext = process.platform === "win32" ? ".exe" : ""
@@ -48,9 +74,6 @@ export namespace PackageRegistry {
       return false
     }
 
-    const isRange = /[\s^~*xX<>|=]/.test(cachedVersion)
-    if (isRange) return !semver.satisfies(latestVersion, cachedVersion)
-
-    return semver.lt(cachedVersion, latestVersion)
+    return shouldRefreshCachedVersion(latestVersion, cachedVersion)
   }
 }

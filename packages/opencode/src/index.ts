@@ -36,12 +36,8 @@ import { Global } from "./global"
 import { JsonMigration } from "./storage/json-migration"
 import { Database } from "./storage/db"
 import { initializeHuggingFaceMirrors } from "./util/hf-mirror"
-import { initEmbeddingBackgroundService } from "./ai/rag/embedding-bg-service"
-import { getBackgroundServiceManager } from "./util/background-service"
 
 initializeHuggingFaceMirrors()
-initEmbeddingBackgroundService()
-void getBackgroundServiceManager().startAll()
 
 process.on("unhandledRejection", (e) => {
   Log.Default.error("rejection", {

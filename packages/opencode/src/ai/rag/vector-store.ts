@@ -169,7 +169,8 @@ export class VectorStore {
   private storageDir: string
   private backend?: VectorDatabaseBackend
   private snapshotCache: ManagedCache<{ entries: VectorEntry[] }>
-  private backendInit: Promise<void>
+  private backendInit?: Promise<void>
+  private persistenceInit?: Promise<void>
   private backendReady = false
   private persistenceSettled = false
   private projectVersions = new Map<string, number>()
@@ -194,18 +195,6 @@ export class VectorStore {
       sochNamespace: `vectors-snapshot-${cacheSegment(this.storageDir)}`,
       jsonDir: this.storageDir,
     })
-    this.backendInit = this.initializeBackend().catch((error) => {
-      log.warn("vector backend init failed", { error: String(error) })
-    })
-    void this.snapshotCache
-      .whenPersistentReady()
-      .then(() => {
-        this.persistenceSettled = true
-        return Promise.allSettled(Array.from(this.loadedProjects).map((projectId) => this.hydrateFromPersistent(projectId)))
-      })
-      .catch((error) => {
-        log.warn("vector snapshot cache init failed", { error: String(error) })
-      })
   }
 
   async addVector(entry: VectorEntry): Promise<void> {
@@ -213,6 +202,7 @@ export class VectorStore {
   }
 
   async addVectors(entries: VectorEntry[]): Promise<void> {
+    this.ensurePersistenceStarted()
     const grouped = new Map<string, VectorEntry[]>()
 
     for (const entry of entries) {
@@ -245,6 +235,7 @@ export class VectorStore {
   }
 
   async search(queryInput: VectorSearchQuery, limitOrOptions: number | VectorSearchOptions = 10): Promise<VectorSearchResult[]> {
+    this.ensurePersistenceStarted()
     const options = typeof limitOrOptions === "number" ? { limit: limitOrOptions } : limitOrOptions
     const limit = options.limit ?? 10
     const minScore = options.minScore ?? MIN_IMPORTANCE
@@ -336,6 +327,7 @@ export class VectorStore {
   }
 
   async deleteBySession(sessionId: string): Promise<void> {
+    this.ensurePersistenceStarted()
     this.vectors.delete(sessionId)
     this.loadedProjects.delete(sessionId)
     this.hydratedProjects.delete(sessionId)
@@ -347,6 +339,7 @@ export class VectorStore {
   }
 
   async deleteByPath(projectId: string, filePath: string): Promise<number> {
+    this.ensurePersistenceStarted()
     await this.loadProject(projectId)
     const projectStore = this.projectStore(projectId)
     let removed = 0
@@ -365,6 +358,7 @@ export class VectorStore {
   }
 
   async clear(projectId?: string): Promise<void> {
+    this.ensurePersistenceStarted()
     if (projectId) {
       this.vectors.delete(projectId)
       this.loadedProjects.delete(projectId)
@@ -386,6 +380,7 @@ export class VectorStore {
   }
 
   async getProjectSize(projectId: string): Promise<number> {
+    this.ensurePersistenceStarted()
     await this.loadProject(projectId)
     const projectStore = this.vectors.get(projectId)
     if (!projectStore) return 0
@@ -438,6 +433,26 @@ export class VectorStore {
     const projectStore = this.vectors.get(projectId)
     if (!projectStore) return
     await this.snapshotCache.set(projectId, { entries: Array.from(projectStore.values()) })
+  }
+
+  private ensurePersistenceStarted() {
+    if (!this.backendInit) {
+      this.backendInit = this.initializeBackend().catch((error) => {
+        log.warn("vector backend init failed", { error: String(error) })
+      })
+    }
+
+    if (!this.persistenceInit) {
+      this.persistenceInit = this.snapshotCache
+        .whenPersistentReady()
+        .then(() => {
+          this.persistenceSettled = true
+          return Promise.allSettled(Array.from(this.loadedProjects).map((projectId) => this.hydrateFromPersistent(projectId)))
+        })
+        .catch((error) => {
+          log.warn("vector snapshot cache init failed", { error: String(error) })
+        })
+    }
   }
 
   private async initializeBackend() {

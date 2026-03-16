@@ -45,7 +45,7 @@ export class KnowledgeGraph {
   private backupDir = path.join(Global.Path.data, "knowledge-graph")
   private snapshotCache: ManagedCache<{ nodes?: KnowledgeNode[]; edges?: KnowledgeEdge[] }>
   private persistenceSettled = false
-  private backendInit: Promise<void>
+  private backendInit?: Promise<void>
   private version = 0
   private syncedVersion = -1
   private syncTask?: Promise<void>
@@ -61,15 +61,6 @@ export class KnowledgeGraph {
     })
     this.activeProjectId = this.projectKey()
     this.restoreBackup(this.activeProjectId)
-    this.backendInit = this.snapshotCache
-      .whenPersistentReady()
-      .then(async () => {
-        this.persistenceSettled = true
-        await this.hydrateProject(this.activeProjectId)
-      })
-      .catch((error) => {
-      log.warn("knowledge graph backend init failed", { error: String(error) })
-      })
   }
 
   addNode(node: Omit<KnowledgeNode, "id" | "timeCreated" | "lastAccessed" | "accessCount">): string {
@@ -317,6 +308,7 @@ export class KnowledgeGraph {
   }
 
   private ensureProjectContext() {
+    this.ensurePersistenceStarted()
     const nextProjectId = this.projectKey()
     if (nextProjectId === this.activeProjectId) {
       return
@@ -341,6 +333,19 @@ export class KnowledgeGraph {
         })
       })
     }
+  }
+
+  private ensurePersistenceStarted() {
+    if (this.backendInit) return
+    this.backendInit = this.snapshotCache
+      .whenPersistentReady()
+      .then(async () => {
+        this.persistenceSettled = true
+        await this.hydrateProject(this.activeProjectId)
+      })
+      .catch((error) => {
+        log.warn("knowledge graph backend init failed", { error: String(error) })
+      })
   }
 
   private async hydrateProject(projectId: string) {
