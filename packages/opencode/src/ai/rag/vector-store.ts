@@ -445,9 +445,9 @@ export class VectorStore {
     if (!this.persistenceInit) {
       this.persistenceInit = this.snapshotCache
         .whenPersistentReady()
-        .then(() => {
+        .then(async () => {
           this.persistenceSettled = true
-          return Promise.allSettled(Array.from(this.loadedProjects).map((projectId) => this.hydrateFromPersistent(projectId)))
+          await Promise.allSettled(Array.from(this.loadedProjects).map((projectId) => this.hydrateFromPersistent(projectId)))
         })
         .catch((error) => {
           log.warn("vector snapshot cache init failed", { error: String(error) })
