@@ -3,13 +3,14 @@ import os from "os"
 import fs from "fs/promises"
 import z from "zod"
 import { Filesystem } from "../util/filesystem"
-import { Identifier } from "../id/id"
+import { SessionID, MessageID, PartID } from "./schema"
 import { MessageV2 } from "./message-v2"
 import { Log } from "../util/log"
 import { SessionRevert } from "./revert"
 import { Session } from "."
 import { Agent } from "../agent/agent"
 import { Provider } from "../provider/provider"
+import { ModelID, ProviderID } from "../provider/schema"
 import { type Tool as AITool, tool, jsonSchema, type ToolCallOptions, asSchema } from "ai"
 import { SessionCompaction } from "./compaction"
 import { Instance } from "../project/instance"
@@ -52,6 +53,20 @@ import { Truncate } from "@/tool/truncation"
 import { getController, removeController, type Complexity } from "@/util/dynamic-turn-control"
 import { getMCPRouter } from "@/util/smart-router"
 import { removeBudget } from "@/util/instance-memory-budget"
+import { decodeDataUrl } from "@/util/data-url"
+import { buildAutoGroundingContext, extractAutoGroundingQueryFromParts } from "@/ai/rag/auto-context"
+import { EvidenceLedger } from "@/ai/evidence/ledger"
+import { writeTodoMarkdown } from "./todo-markdown"
+import { verifyWithFVA, buildGroundingConstraints } from "@/ai/rag/contra-retriever"
+import { WorkflowOrchestrator } from "@/ai/workflow/orchestrator"
+import { ProjectMemory } from "@/ai/memory/project-memory"
+import { LearningStore } from "@/ai/memory/learning-store"
+import { KnowledgeContext } from "@/ai/knowledge/context"
+import type { KnowledgeGraph } from "@/ai/knowledge"
+import { Personality } from "@/ai/personality"
+import { ToolBroker, type ToolDescriptor } from "@/ai/tool-broker"
+import { WorkspaceIntelligence } from "@/ai/workspace-intelligence"
+import { embeddingBackgroundService } from "@/ai/rag/embedding-bg-service"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -77,6 +92,23 @@ export namespace SessionPrompt {
     return "moderate"
   }
 
+  /** @internal Exported for testing */
+  export function shouldRunAnswerVerification(input: { intent?: TaskIntent }) {
+    return !(input.intent?.type === "exploration" && input.intent.mode === "question")
+  }
+
+  /** @internal Exported for testing */
+  export function resolveVerificationIntent(input: {
+    intent?: TaskIntent
+    userInput?: string
+    assistantText?: string
+  }) {
+    if (input.intent) return input.intent
+    const candidate = (input.userInput || input.assistantText || "").trim()
+    if (!candidate) return undefined
+    return IntentDetection.detect(candidate)
+  }
+
   function tokenCount(tokens: MessageV2.Assistant["tokens"]) {
     return tokens.total || tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
   }
@@ -87,6 +119,22 @@ export namespace SessionPrompt {
       output: tokens.output + tokens.reasoning,
       total: tokenCount(tokens),
     }
+  }
+
+  function inferToolDescriptorSource(id: string): ToolDescriptor["source"] {
+    if (["websearch", "webfetch"].includes(id)) return "web"
+    if (["rag_query", "rag_index", "read", "grep", "glob", "codesearch"].includes(id)) return "retrieval"
+    if (id === "skill") return "skill"
+    if (id === "task") return "subagent"
+    return "builtin"
+  }
+
+  function toolDescriptorsFromResolvedTools(tools: Record<string, AITool>): ToolDescriptor[] {
+    return Object.entries(tools).map(([id, item]) => ({
+      id,
+      description: item.description ?? "",
+      source: inferToolDescriptorSource(id),
+    }))
   }
 
   /** @internal Exported for testing */
@@ -109,6 +157,177 @@ export namespace SessionPrompt {
     }
   }
 
+  /** @internal Exported for testing */
+  export function getVerificationRevisionKey(input: {
+    turnUserID?: string
+    lastUserID: string
+  }) {
+    return input.turnUserID ?? input.lastUserID
+  }
+
+  export interface CapabilitySystemPromptInput {
+    sessionID: string
+    projectID: string
+    rootDir: string
+    userInput: string
+    intent?: TaskIntent
+    turnControlComplexity: Complexity
+    agent: Agent.Info
+    toolDescriptors: ToolDescriptor[]
+    autoGroundingSystemPrompt?: string
+    knowledgeGraph?: KnowledgeGraph
+  }
+
+  export async function buildCapabilitySystemPrompts(input: CapabilitySystemPromptInput) {
+    const personalityPrompt = Personality.renderSystemPrompt(
+      Personality.resolveProfile({
+        agent: input.agent,
+        intent: input.intent,
+        userPrompt: input.userInput,
+      }),
+    )
+
+    const prompts: string[] = []
+    const callouts: RuntimeCapabilityCallout[] = []
+    const workflowState = await WorkflowOrchestrator.get(input.sessionID)
+    if (workflowState) {
+      prompts.push(WorkflowOrchestrator.renderSystemContext(workflowState))
+    }
+    const projectMemoryPrompt = await ProjectMemory.renderPromptContext(input.projectID, input.userInput)
+    if (projectMemoryPrompt) {
+      prompts.push(projectMemoryPrompt)
+      callouts.push({
+        tool: "project_memory",
+        title: "Project memory context injected",
+        description:
+          "Loads durable project memory about constraints, prior failures, and learned facts so the model starts from repository-specific context.",
+        output: "Injected project memory context for this turn.",
+        input: {
+          source: "project_memory",
+        },
+        metadata: {
+          capability: "project_memory",
+        },
+      })
+    }
+    const workspacePrompt = await WorkspaceIntelligence.renderPromptContext({
+      sessionID: input.sessionID,
+      projectID: input.projectID,
+      rootDir: input.rootDir,
+    })
+    if (workspacePrompt) {
+      prompts.push(workspacePrompt)
+      callouts.push({
+        tool: "workspace_context",
+        title: "Workspace intelligence context injected",
+        description:
+          "Adds nearby workspace and recent-session context so the model can reason across related worktrees, branches, and active project areas.",
+        output: "Injected workspace intelligence context for this turn.",
+        input: {
+          root: clipCapabilityValue(input.rootDir, 48),
+        },
+        metadata: {
+          capability: "workspace_intelligence",
+        },
+      })
+    }
+    const knowledgeGraphPrompt = await KnowledgeContext.renderPromptContext(input.userInput, {
+      rootDir: input.rootDir,
+      graph: input.knowledgeGraph,
+    })
+    if (knowledgeGraphPrompt) {
+      prompts.push(knowledgeGraphPrompt)
+      callouts.push({
+        tool: "knowledge_graph",
+        title: "Knowledge graph context injected",
+        description:
+          "Injects ranked knowledge-graph paths and related project facts so answers can reference structural repository context instead of only raw files.",
+        output: "Injected knowledge graph context for this turn.",
+        input: {
+          query: clipCapabilityValue(input.userInput, 48),
+        },
+        metadata: {
+          capability: "knowledge_graph_context",
+        },
+      })
+    }
+    const learnedStrategiesPrompt = await LearningStore.renderPromptContext({
+      projectID: input.projectID,
+      rootDir: input.rootDir,
+      taskType: input.intent?.type ?? "general",
+      complexity: input.intent?.type === "implementation" ? input.intent.complexity : input.turnControlComplexity,
+    })
+    if (learnedStrategiesPrompt) {
+      prompts.push(learnedStrategiesPrompt)
+    }
+    const brokerContext = ToolBroker.renderPromptContext(
+      ToolBroker.decide({
+        intent: input.intent ?? IntentDetection.detect(input.userInput),
+        agent: input.agent,
+        tools: await ToolBroker.enrichDescriptors({
+          projectID: input.projectID,
+          tools: input.toolDescriptors,
+        }),
+        currentTask: input.userInput,
+      }),
+    )
+    if (brokerContext) {
+      prompts.push(brokerContext)
+      callouts.push({
+        tool: "tool_broker",
+        title: "Tool broker guidance injected",
+        description:
+          "Ranks and explains the best tool sources for the current task so the model gets explicit routing guidance before choosing tools.",
+        output: "Injected tool broker routing guidance for this turn.",
+        input: {
+          tool_candidates: input.toolDescriptors.length,
+        },
+        metadata: {
+          capability: "tool_broker",
+        },
+      })
+    }
+    const evidencePrompt = await EvidenceLedger.renderPromptContext(input.sessionID, input.projectID)
+    if (evidencePrompt) {
+      prompts.push(evidencePrompt)
+    }
+    if (input.intent?.type === "exploration" && input.intent.mode === "question") {
+      prompts.push(
+        [
+          "<response_style>",
+          "This turn is a direct question, not a multi-step implementation workflow.",
+          "Answer directly and keep the default response concise.",
+          "Do not produce plans, todo lists, or extended explanations unless the user asks for more depth or the evidence is genuinely conflicting.",
+          "</response_style>",
+        ].join("\n"),
+      )
+    }
+    if (input.autoGroundingSystemPrompt) {
+      prompts.push(input.autoGroundingSystemPrompt)
+    }
+
+    const embeddingContext = embeddingBackgroundService.getRuntimeContext()
+    prompts.push(
+      [
+        "<embedding_runtime>",
+        "Embedding runtime status for retrieval, memory, and evidence quality.",
+        `Service status: ${embeddingContext.serviceStatus}`,
+        `Target provider: ${embeddingContext.targetProvider} (source=${embeddingContext.source})`,
+        `Active provider: ${embeddingContext.activeProvider} (kind=${embeddingContext.activeProviderKind}, mode=${embeddingContext.mode})`,
+        embeddingContext.lastError ? `Last provider error: ${embeddingContext.lastError}` : "",
+        "</embedding_runtime>",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    )
+
+    return {
+      personalityPrompt,
+      prompts,
+      callouts,
+    }
+  }
+
   const selfDrivenAgents = new Map<string, SelfDrivenAgent>()
 
   function getSelfDrivenAgent(sessionID: string) {
@@ -116,6 +335,158 @@ export namespace SessionPrompt {
       selfDrivenAgents.set(sessionID, createSelfDrivenAgent())
     }
     return selfDrivenAgents.get(sessionID)!
+  }
+
+  type RuntimeCapabilityCallout = {
+    tool: string
+    title: string
+    description: string
+    output: string
+    input?: Record<string, string | number | boolean>
+    metadata?: Record<string, unknown>
+  }
+
+  function clipCapabilityValue(value: string, max = 80) {
+    const normalized = value.replace(/\s+/g, " ").trim()
+    if (normalized.length <= max) return normalized
+    return normalized.slice(0, max - 1).trimEnd() + "…"
+  }
+
+  function summarizeIntent(intent: TaskIntent): Record<string, string | number | boolean> {
+    switch (intent.type) {
+      case "review":
+        return {
+          type: intent.type,
+          scope: intent.scope,
+          target: clipCapabilityValue(intent.target),
+        }
+      case "implementation":
+        return {
+          type: intent.type,
+          complexity: intent.complexity,
+        }
+      case "debugging":
+        return {
+          type: intent.type,
+          error: clipCapabilityValue(intent.error),
+        }
+      case "exploration":
+        return {
+          type: intent.type,
+          query: clipCapabilityValue(intent.query),
+          mode: intent.mode,
+        }
+      default:
+        return {
+          type: "unknown",
+        }
+    }
+  }
+
+  function formatCapabilityProgress(value: unknown) {
+    if (typeof value !== "number" || !Number.isFinite(value)) return "unknown"
+    return `${Math.round(value * 100)}%`
+  }
+
+  function textFromParts(parts: MessageV2.Part[]) {
+    return parts
+      .filter((part): part is MessageV2.TextPart => part.type === "text")
+      .map((part) => part.text)
+      .join("\n")
+      .trim()
+  }
+
+  function isSyntheticPart(part: MessageV2.Part) {
+    return "synthetic" in part && !!part.synthetic
+  }
+
+  /** @internal Exported for testing */
+  export function resolveTurnUserContext(input: {
+    history: Array<Pick<MessageV2.WithParts, "info" | "parts">>
+  }) {
+    for (let i = input.history.length - 1; i >= 0; i--) {
+      const message = input.history[i]
+      if (message.info.role !== "user") continue
+
+      const nonSyntheticParts = message.parts.filter((part) => !isSyntheticPart(part))
+      if (nonSyntheticParts.length === 0) continue
+
+      return {
+        userID: message.info.id,
+        parts: nonSyntheticParts,
+        userInput: textFromParts(nonSyntheticParts),
+      }
+    }
+    return undefined
+  }
+
+  async function emitCapabilityCallout(input: {
+    sessionID: string
+    messageID: string
+    callout: RuntimeCapabilityCallout
+  }) {
+    const started = Date.now()
+    await Session.updatePart({
+      id: PartID.ascending(),
+      messageID: input.messageID,
+      sessionID: input.sessionID,
+      type: "tool",
+      callID: ulid(),
+      tool: input.callout.tool,
+      state: {
+        status: "completed",
+        input: input.callout.input ?? {},
+        output: input.callout.output,
+        title: input.callout.title,
+        metadata: {
+          description: input.callout.description,
+          internal: true,
+          ...(input.callout.metadata ?? {}),
+        },
+        time: {
+          start: started,
+          end: started,
+        },
+      },
+    } satisfies MessageV2.ToolPart)
+  }
+
+  async function createInternalAssistantMessage(input: {
+    sessionID: string
+    parentID: string
+    agent: string
+    variant?: string
+    model: {
+      providerID: string
+      modelID: string
+    }
+  }) {
+    return (await Session.updateMessage({
+      id: MessageID.ascending(),
+      parentID: input.parentID,
+      role: "assistant",
+      mode: input.agent,
+      agent: input.agent,
+      variant: input.variant,
+      path: {
+        cwd: Instance.directory,
+        root: Instance.worktree,
+      },
+      cost: 0,
+      tokens: {
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+      modelID: input.model.modelID,
+      providerID: input.model.providerID,
+      time: {
+        created: Date.now(),
+        completed: Date.now(),
+      },
+      sessionID: input.sessionID,
+    })) as MessageV2.Assistant
   }
 
   let stateCache: any = null
@@ -149,18 +520,18 @@ export namespace SessionPrompt {
   // Alias for backward compatibility
   const state = getState
 
-  export function assertNotBusy(sessionID: string) {
-    const match = getState()[sessionID]
+  export function assertNotBusy(sessionID: SessionID) {
+    const match = state()[sessionID]
     if (match) throw new Session.BusyError(sessionID)
   }
 
   export const PromptInput = z.object({
-    sessionID: Identifier.schema("session"),
-    messageID: Identifier.schema("message").optional(),
+    sessionID: SessionID.zod,
+    messageID: MessageID.zod.optional(),
     model: z
       .object({
-        providerID: z.string(),
-        modelID: z.string(),
+        providerID: ProviderID.zod,
+        modelID: ModelID.zod,
       })
       .optional(),
     agent: z.string().optional(),
@@ -301,8 +672,8 @@ export namespace SessionPrompt {
     return parts
   }
 
-  function start(sessionID: string) {
-    const s = getState()
+  function start(sessionID: SessionID) {
+    const s = state()
     if (s[sessionID]) return
     const controller = new AbortController()
     s[sessionID] = {
@@ -312,14 +683,14 @@ export namespace SessionPrompt {
     return controller.signal
   }
 
-  function resume(sessionID: string) {
-    const s = getState()
+  function resume(sessionID: SessionID) {
+    const s = state()
     if (!s[sessionID]) return
 
     return s[sessionID].abort.signal
   }
 
-  export function cancel(sessionID: string) {
+  export function cancel(sessionID: SessionID) {
     log.info("cancel", { sessionID })
     const s = state()
     const match = s[sessionID]
@@ -334,7 +705,7 @@ export namespace SessionPrompt {
   }
 
   export const LoopInput = z.object({
-    sessionID: Identifier.schema("session"),
+    sessionID: SessionID.zod,
     resume_existing: z.boolean().optional(),
   })
   export const loop = fn(LoopInput, async (input) => {
@@ -352,6 +723,10 @@ export namespace SessionPrompt {
       cancel(sessionID)
       removeController(sessionID)
       removeBudget(sessionID)
+      // Always sync todo list on exit — covers exceptions, aborts, and clean exits
+      void Todo.get(sessionID)
+        .then((todos) => todos.length > 0 ? writeTodoMarkdown(sessionID, todos) : undefined)
+        .catch(() => undefined)
     })
 
     // Structured output state
@@ -364,6 +739,12 @@ export namespace SessionPrompt {
     let turnControlComplexity: Complexity = "moderate"
     let turnControlReady = false
     let turnControlReminderSent = false
+    let autoGroundingUserID: string | undefined
+    let autoGroundingSystemPrompt: string | undefined
+    let turnIntent: TaskIntent | undefined
+    let turnUserInput = ""
+    let turnUserID: string | undefined
+    const verificationRevisionCount = new Map<string, number>()
 
     let step = 0
     const session = await Session.get(sessionID)
@@ -372,6 +753,7 @@ export namespace SessionPrompt {
       log.info("loop", { step, sessionID })
       if (abort.aborted) break
       let msgs = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
+      const capabilityCallouts: RuntimeCapabilityCallout[] = []
 
       let lastUser: MessageV2.User | undefined
       let lastUserParts: MessageV2.Part[] = []
@@ -395,25 +777,119 @@ export namespace SessionPrompt {
       }
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+
+      const turnUserContext = resolveTurnUserContext({ history: msgs })
+      if (!turnUserContext) throw new Error("No non-synthetic user message found in stream. This should never happen.")
+
+      if (turnUserContext.userID !== autoGroundingUserID) {
+        autoGroundingUserID = turnUserContext.userID
+        autoGroundingSystemPrompt = undefined
+        const query = extractAutoGroundingQueryFromParts(turnUserContext.parts)
+        const grounding = query
+          ? await buildAutoGroundingContext({
+              query,
+              projectId: session.projectID,
+              rootDir: Instance.project.worktree,
+              fallbackDir: Instance.directory,
+            })
+          : undefined
+
+        if (grounding) {
+          void EvidenceLedger.recordGrounding({
+            sessionID,
+            projectID: session.projectID,
+            bundle: grounding.grounding,
+            source: "retrieval",
+            metadata: {
+              autoIndexed: grounding.autoIndexed,
+              channel: "auto_grounding",
+            },
+          }).catch(() => undefined)
+          void WorkflowOrchestrator.noteEvidence(
+            sessionID,
+            grounding.evidence.map((item) => item.attribution),
+          ).catch(() => undefined)
+          autoGroundingSystemPrompt = grounding.system
+          capabilityCallouts.push({
+            tool: "rag_query",
+            title: grounding.autoIndexed ? "Project context retrieved after auto-index" : "Project context retrieved",
+            description:
+              "Automatically retrieves relevant project code context for the current turn and injects it into the model call as grounding evidence.",
+            output: `Retrieved ${grounding.evidence.length} grounded code references for this turn.`,
+            input: {
+              query: clipCapabilityValue(grounding.query, 60),
+              references: grounding.evidence.length,
+              auto_indexed: grounding.autoIndexed,
+            },
+            metadata: {
+              capability: "rag_auto_grounding",
+              evidence: grounding.evidence.map((item) => item.attribution),
+            },
+          })
+        }
+
+        // Pre-generation contra-retrieval: inject known contradictions to the query as constraints
+        if (query) {
+          const constraints = await buildGroundingConstraints(query, session.projectID).catch(() => undefined)
+          if (constraints) {
+            autoGroundingSystemPrompt = autoGroundingSystemPrompt ? `${autoGroundingSystemPrompt}\n${constraints}` : constraints
+          }
+        }
+      }
       
       // Initialize Self-Driven Agent if this is a new turn
       if (lastUser && step === 0) {
-        const userInput = lastUserParts
-          .filter((p) => p.type === "text")
-          .map((p) => (p as MessageV2.TextPart).text)
-          .join("\n")
-        const detectedIntent = IntentDetection.detect(userInput)
+        turnUserID = turnUserContext.userID
+        turnUserInput = turnUserContext.userInput
+        const detectedIntent = IntentDetection.detect(turnUserInput)
+        turnIntent = detectedIntent
         turnControlComplexity = mapIntentToTurnComplexity(detectedIntent)
-        
-        await sdAgent.initialize({
-          userInput,
-          intent: detectedIntent,
-          history: msgs.map((m) => ({
-            role: m.info.role === "assistant" ? "assistant" : m.info.role === "user" ? "user" : "tool", // approximate mapping
-            content: m.parts.filter((p) => p.type === "text").map((p) => (p as MessageV2.TextPart).text).join("\n")
-          }))
+        const learningComplexity = detectedIntent.type === "implementation" ? detectedIntent.complexity : turnControlComplexity
+        capabilityCallouts.push({
+          tool: "intent",
+          title: "Intent detected",
+          description:
+            "Classifies the current user turn so the session loop can choose review, implementation, debugging, or exploration behavior.",
+          output: `Detected ${detectedIntent.type} intent for this turn.`,
+          input: summarizeIntent(detectedIntent),
+          metadata: {
+            capability: "intent_detection",
+          },
         })
+
+        const workflowState = await WorkflowOrchestrator.initialize({
+          sessionID,
+          prompt: turnUserInput,
+          intent: detectedIntent,
+        })
+        await ProjectMemory.rememberPromptConstraints(session.projectID, turnUserInput)
+        await LearningStore.startTask(
+          {
+            projectID: session.projectID,
+            rootDir: Instance.project.worktree,
+            taskType: detectedIntent.type,
+            complexity: learningComplexity,
+          },
+          [detectedIntent.type],
+        )
+        capabilityCallouts.push({
+          tool: "workflow",
+          title: "Structured workflow initialized",
+          description:
+            "Builds a structured plan and workflow state for the current turn so the loop can reason, execute, and verify against the same task model.",
+          output: `Initialized ${workflowState.plan.plan.steps.flatMap((step) => step.tasks).length} planned tasks for this turn.`,
+          input: {
+            phase: workflowState.currentPhase,
+            intent: detectedIntent.type,
+          },
+          metadata: {
+            capability: "workflow_orchestrator",
+          },
+        })
+        
       }
+
+      // Defer sdAgent.initialize() to after model is resolved so we can pass Provider.Model
 
       const shouldExit =
         lastAssistant?.finish &&
@@ -434,8 +910,37 @@ export namespace SessionPrompt {
             ? `You have pending items in your todo list. The next task is: "${nextTodo.content}". Please proceed.`
             : "You have pending items in your todo list. Please proceed to the next task."
 
+          const capabilityMessage = await createInternalAssistantMessage({
+            sessionID,
+            parentID: lastUser.id,
+            agent: lastUser.agent,
+            variant: lastUser.variant,
+            model: lastUser.model,
+          })
+          await emitCapabilityCallout({
+            sessionID,
+            messageID: capabilityMessage.id,
+            callout: {
+              tool: "todo_continuation",
+              title: "Continuation triggered by pending todos",
+              description:
+                "Keeps the session loop running when tracked todo items are still pending or in progress, instead of exiting early.",
+              output: nextTodo
+                ? `Pending todo detected: ${clipCapabilityValue(nextTodo.content)}`
+                : "Pending todo items detected.",
+              input: {
+                pending: todos.filter((t) => t.status === "pending").length,
+                in_progress: todos.filter((t) => t.status === "in_progress").length,
+                next: nextTodo ? clipCapabilityValue(nextTodo.content, 48) : false,
+              },
+              metadata: {
+                capability: "todo_continuation",
+              },
+            },
+          })
+
           const summaryUserMsg = (await Session.updateMessage({
-            id: Identifier.ascending("message"),
+            id: MessageID.ascending(),
             sessionID,
             role: "user",
             time: { created: Date.now() },
@@ -444,7 +949,7 @@ export namespace SessionPrompt {
           })) as MessageV2.User
 
           await Session.updatePart({
-            id: Identifier.ascending("part"),
+            id: PartID.ascending(),
             messageID: summaryUserMsg.id,
             sessionID,
             type: "text",
@@ -463,8 +968,36 @@ export namespace SessionPrompt {
            const nextAction = remainingWork.suggestedActions[0] || "Continue with the next step."
            const reminder = `Self-Correction: You still have incomplete goals. \nRemaining items: ${remainingWork.items.join(", ")}. \nSuggested action: ${nextAction}`
 
+           const capabilityMessage = await createInternalAssistantMessage({
+            sessionID,
+            parentID: lastUser.id,
+            agent: lastUser.agent,
+            variant: lastUser.variant,
+            model: lastUser.model,
+          })
+          await emitCapabilityCallout({
+            sessionID,
+            messageID: capabilityMessage.id,
+            callout: {
+              tool: "self_correction",
+              title: "Self-correction resumed work",
+              description:
+                "Uses the self-driven agent's remaining-work check to resume the loop when goals are still incomplete.",
+              output: `Remaining work detected at ${formatCapabilityProgress(remainingWork.progress)} progress.`,
+              input: {
+                remaining: remainingWork.items.length,
+                progress: formatCapabilityProgress(remainingWork.progress),
+                next_action: clipCapabilityValue(nextAction, 48),
+              },
+              metadata: {
+                capability: "self_correction",
+                remainingItems: remainingWork.items,
+              },
+            },
+          })
+
            const summaryUserMsg = (await Session.updateMessage({
-            id: Identifier.ascending("message"),
+            id: MessageID.ascending(),
             sessionID,
             role: "user",
             time: { created: Date.now() },
@@ -473,7 +1006,7 @@ export namespace SessionPrompt {
           })) as MessageV2.User
 
           await Session.updatePart({
-            id: Identifier.ascending("part"),
+            id: PartID.ascending(),
             messageID: summaryUserMsg.id,
             sessionID,
             type: "text",
@@ -485,6 +1018,7 @@ export namespace SessionPrompt {
         }
 
         log.info("exiting loop", { sessionID })
+        void WorkflowOrchestrator.complete(sessionID).catch(() => undefined)
         break
       }
 
@@ -513,6 +1047,18 @@ export namespace SessionPrompt {
         await turnController.initialize(turnControlComplexity, model.limit.input || model.limit.context || 0)
         turnControlReady = true
       }
+      if (step === 1) {
+        await sdAgent.initialize({
+          userInput: turnUserInput,
+          intent: turnIntent!,
+          history: msgs.map((m) => ({
+            role: m.info.role === "assistant" ? "assistant" : m.info.role === "user" ? "user" : "tool",
+            content: m.parts.filter((p) => p.type === "text").map((p) => (p as MessageV2.TextPart).text).join("\n"),
+          })),
+          model,
+          sessionID,
+        })
+      }
       const task = tasks.pop()
 
       // pending subtask
@@ -521,7 +1067,7 @@ export namespace SessionPrompt {
         const taskTool = await TaskTool.init()
         const taskModel = task.model ? await Provider.getModel(task.model.providerID, task.model.modelID) : model
         const assistantMessage = (await Session.updateMessage({
-          id: Identifier.ascending("message"),
+          id: MessageID.ascending(),
           role: "assistant",
           parentID: lastUser.id,
           sessionID,
@@ -546,7 +1092,7 @@ export namespace SessionPrompt {
           },
         })) as MessageV2.Assistant
         let part = (await Session.updatePart({
-          id: Identifier.ascending("part"),
+          id: PartID.ascending(),
           messageID: assistantMessage.id,
           sessionID: assistantMessage.sessionID,
           type: "tool",
@@ -591,14 +1137,14 @@ export namespace SessionPrompt {
           extra: { bypassAgentCheck: true },
           messages: msgs,
           async metadata(input) {
-            await Session.updatePart({
+            part = (await Session.updatePart({
               ...part,
               type: "tool",
               state: {
                 ...part.state,
                 ...input,
               },
-            } satisfies MessageV2.ToolPart)
+            } satisfies MessageV2.ToolPart)) as MessageV2.ToolPart
           },
           async ask(req) {
             await PermissionNext.ask({
@@ -615,7 +1161,7 @@ export namespace SessionPrompt {
         })
         const attachments = result?.attachments?.map((attachment) => ({
           ...attachment,
-          id: Identifier.ascending("part"),
+          id: PartID.ascending(),
           sessionID,
           messageID: assistantMessage.id,
         }))
@@ -659,7 +1205,7 @@ export namespace SessionPrompt {
                 start: part.state.status === "running" ? part.state.time.start : Date.now(),
                 end: Date.now(),
               },
-              metadata: part.metadata,
+              metadata: "metadata" in part.state ? part.state.metadata : undefined,
               input: part.state.input,
             },
           } satisfies MessageV2.ToolPart)
@@ -670,7 +1216,7 @@ export namespace SessionPrompt {
           // If we create assistant messages w/ out user ones following mid loop thinking signatures
           // will be missing and it can cause errors for models like gemini for example
           const summaryUserMsg: MessageV2.User = {
-            id: Identifier.ascending("message"),
+            id: MessageID.ascending(),
             sessionID,
             role: "user",
             time: {
@@ -681,7 +1227,7 @@ export namespace SessionPrompt {
           }
           await Session.updateMessage(summaryUserMsg)
           await Session.updatePart({
-            id: Identifier.ascending("part"),
+            id: PartID.ascending(),
             messageID: summaryUserMsg.id,
             sessionID,
             type: "text",
@@ -740,7 +1286,7 @@ export namespace SessionPrompt {
 
       const processor = SessionProcessor.create({
         assistantMessage: (await Session.updateMessage({
-          id: Identifier.ascending("message"),
+          id: MessageID.ascending(),
           parentID: lastUser.id,
           role: "assistant",
           mode: agent.name,
@@ -770,6 +1316,35 @@ export namespace SessionPrompt {
       })
       using _ = defer(() => InstructionPrompt.clear(processor.message.id))
 
+      for (const callout of capabilityCallouts) {
+        await emitCapabilityCallout({
+          sessionID,
+          messageID: processor.message.id,
+          callout,
+        })
+      }
+
+      if (turnDecision && !turnDecision.shouldContinue) {
+        await emitCapabilityCallout({
+          sessionID,
+          messageID: processor.message.id,
+          callout: {
+            tool: "turn_control",
+            title: "Turn controller requested wrap-up",
+            description:
+              "Applies the loop boundary heuristic to decide when the agent should wrap up instead of starting more tool work.",
+            output: `Wrap-up recommended: ${turnDecision.reason}`,
+            input: {
+              decision: "wrap_up",
+              reason: clipCapabilityValue(turnDecision.reason),
+            },
+            metadata: {
+              capability: "dynamic_turn_control",
+            },
+          },
+        })
+      }
+
       // Check if user explicitly invoked an agent via @ in this turn
       const lastUserMsg = msgs.findLast((m) => m.info.role === "user")
       const bypassAgentCheck = lastUserMsg?.parts.some((p) => p.type === "agent") ?? false
@@ -783,12 +1358,14 @@ export namespace SessionPrompt {
         bypassAgentCheck,
         messages: msgs,
         sdAgent,
+        intent: turnIntent,
       })
+      const format = lastUser.format ?? { type: "text" }
 
       // Inject StructuredOutput tool if JSON schema mode enabled
-      if (lastUser.format?.type === "json_schema") {
+      if (format.type === "json_schema") {
         tools["StructuredOutput"] = createStructuredOutputTool({
-          schema: lastUser.format.schema,
+          schema: format.schema,
           onSuccess(output) {
             structuredOutput = output
           },
@@ -824,7 +1401,31 @@ export namespace SessionPrompt {
       await Plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
       // Build system prompt, adding structured output instruction if needed
-      const system = [...(await SystemPrompt.environment(model)), ...(await InstructionPrompt.system())]
+      const skills = await SystemPrompt.skills(agent)
+      const system = [
+        ...(await SystemPrompt.environment(model)),
+        ...(skills ? [skills] : []),
+        ...(await InstructionPrompt.system()),
+      ]
+      const capabilitySystemPrompts = await buildCapabilitySystemPrompts({
+        sessionID,
+        projectID: session.projectID,
+        rootDir: Instance.project.worktree,
+        userInput: turnUserInput,
+        intent: turnIntent,
+        turnControlComplexity,
+        agent,
+        toolDescriptors: toolDescriptorsFromResolvedTools(tools),
+        autoGroundingSystemPrompt,
+      })
+      system.push(capabilitySystemPrompts.personalityPrompt)
+      for (const callout of capabilitySystemPrompts.callouts) {
+        await emitCapabilityCallout({
+          sessionID,
+          messageID: processor.message.id,
+          callout,
+        })
+      }
       if (turnDecision && !turnDecision.shouldContinue) {
         turnControlReminderSent = true
         system.push(
@@ -838,9 +1439,37 @@ export namespace SessionPrompt {
       } else {
         turnControlReminderSent = false
       }
-      
+
       // Inject Self-Driven Agent Context
       const thinkingResult = await sdAgent.onBeforeLLMCall()
+      const wfState = await WorkflowOrchestrator.get(sessionID)
+      const planClarificationQuestions = wfState?.plan.clarificationQuestions ?? []
+      const shouldPauseForPlanClarification = step === 0 && planClarificationQuestions.length > 0
+      const shouldPauseForClarification = !!thinkingResult.promptGuidance || shouldPauseForPlanClarification
+      const shouldGateToolUse =
+        format.type !== "json_schema" && (shouldPauseForClarification || turnDecision?.shouldContinue === false)
+      await emitCapabilityCallout({
+        sessionID,
+        messageID: processor.message.id,
+        callout: {
+          tool: "self_driven",
+          title: "Self-driven state prepared",
+          description:
+            "Prepares self-driven loop state before the next model call, including the current phase, progress, and active goals.",
+          output: "Prepared self-driven context for the next model call.",
+          input: {
+            phase: String(thinkingResult.enhancedContext.agentPhase ?? "unknown"),
+            progress: formatCapabilityProgress(thinkingResult.enhancedContext.goalProgress),
+            goals: Array.isArray(thinkingResult.enhancedContext.activeGoals)
+              ? thinkingResult.enhancedContext.activeGoals.length
+              : 0,
+            guidance: !!thinkingResult.promptGuidance,
+          },
+          metadata: {
+            capability: "self_driven_agent",
+          },
+        },
+      })
       if (thinkingResult.enhancedContext) {
         const contextStr = JSON.stringify(thinkingResult.enhancedContext, null, 2)
         system.push(`\n<agent_state>\n${contextStr}\n</agent_state>\n`)
@@ -848,8 +1477,45 @@ export namespace SessionPrompt {
       if (thinkingResult.promptGuidance) {
         system.push(`\n<guidance>\n${thinkingResult.promptGuidance}\n</guidance>\n`)
       }
-
-      const format = lastUser.format ?? { type: "text" }
+      if (shouldPauseForPlanClarification) {
+        system.push(
+          [
+            "<plan_clarification_required>",
+            "The structured plan requires clarification before tool execution.",
+            ...planClarificationQuestions.slice(0, 3).map((question) => `- ${question}`),
+            "Ask the user one focused clarification question first. Do not call tools until the user responds.",
+            "</plan_clarification_required>",
+          ].join("\n"),
+        )
+      }
+      // QualityGate hard-block: if the previous attempt failed the gate, mandate fixes before declaring completion
+      if (wfState?.gateDecision?.pass === false) {
+        const gd = wfState.gateDecision
+        system.push(
+          [
+            "<quality_gate_failed>",
+            `Previous attempt FAILED the quality gate: ${gd.reason}`,
+            gd.suggestions?.length ? `Required fixes: ${gd.suggestions.join("; ")}` : "",
+            "You MUST address ALL required fixes above before marking this task complete or stopping work.",
+            "</quality_gate_failed>",
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        )
+      }
+      if (shouldGateToolUse) {
+        system.push(
+          [
+            "<tool_gate>",
+            shouldPauseForClarification
+              ? "Tool use is suspended for this turn. Ask the user one focused clarification question and wait for the reply."
+              : "Tool use is suspended for this turn. Provide a concise wrap-up with the evidence already gathered.",
+            "Do not call more tools unless the user replies with new information.",
+            "</tool_gate>",
+          ].join("\n"),
+        )
+      }
+      system.push(...capabilitySystemPrompts.prompts)
       if (format.type === "json_schema") {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
       }
@@ -871,7 +1537,7 @@ export namespace SessionPrompt {
               ]
             : []),
         ],
-        tools,
+        tools: shouldGateToolUse ? {} : tools,
         model,
         toolChoice: format.type === "json_schema" ? "required" : undefined,
       })
@@ -897,6 +1563,117 @@ export namespace SessionPrompt {
           }).toObject()
           await Session.updateMessage(processor.message)
           break
+        }
+
+        const assistantParts = await MessageV2.parts(processor.message.id)
+        const assistantText = textFromParts(assistantParts)
+        const verificationIntent = resolveVerificationIntent({
+          intent: turnIntent,
+          userInput: turnUserInput,
+          assistantText,
+        })
+        if (assistantText && shouldRunAnswerVerification({ intent: verificationIntent })) {
+          const verification = await verifyWithFVA(assistantText, turnUserInput || assistantText, {
+            projectId: session.projectID,
+            maxClaims: 3,
+          }).catch(() => undefined)
+
+          if (verification) {
+            const verificationClaim = EvidenceLedger.claimFromGroundingBundle({
+              bundle: verification.grounding,
+              source: "verification",
+              metadata: {
+                verdict: verification.verdict,
+                confidence: verification.confidence,
+              },
+            })
+            await EvidenceLedger.append(sessionID, session.projectID, verificationClaim)
+            await ProjectMemory.ingestClaim(session.projectID, verificationClaim)
+            await WorkflowOrchestrator.noteEvidence(
+              sessionID,
+              [...verification.supporting, ...verification.contradicting].map((item) => item.attribution),
+            )
+            await WorkflowOrchestrator.markVerified(
+              sessionID,
+              verification.verdict === "supported",
+              `${verification.verdict} (${verification.confidence.toFixed(2)})`,
+            )
+
+            if (verification.verdict !== "supported") {
+              const counterEvidence = verification.contradicting.map((item) => item.attribution)
+              await ProjectMemory.rememberFailureMode(
+                session.projectID,
+                `Verification ${verification.verdict} for task "${(turnUserInput || assistantText).slice(0, 120)}"`,
+                counterEvidence,
+              )
+            }
+
+            const verificationRevisionKey = getVerificationRevisionKey({
+              turnUserID,
+              lastUserID: lastUser.id,
+            })
+
+            if (
+              verification.verdict !== "supported" &&
+              (verificationRevisionCount.get(verificationRevisionKey) ?? 0) < 1
+            ) {
+              verificationRevisionCount.set(
+                verificationRevisionKey,
+                (verificationRevisionCount.get(verificationRevisionKey) ?? 0) + 1,
+              )
+
+              await emitCapabilityCallout({
+                sessionID,
+                messageID: processor.message.id,
+                callout: {
+                  tool: "fva_verify",
+                  title: "Answer verification requested revision",
+                  description:
+                    "Runs falsification-oriented verification against the draft answer and forces one revision pass when the answer is contradicted or weakly supported.",
+                  output: `Verification verdict: ${verification.verdict} at ${verification.confidence.toFixed(2)} confidence.`,
+                  input: {
+                    verdict: verification.verdict,
+                    confidence: verification.confidence.toFixed(2),
+                    counter_evidence: verification.contradicting.length,
+                  },
+                  metadata: {
+                    capability: "fva_verification",
+                    pessimisticHypotheses: verification.pessimisticHypotheses,
+                  },
+                },
+              })
+
+              const summaryUserMsg = (await Session.updateMessage({
+                id: MessageID.ascending(),
+                sessionID,
+                role: "user",
+                time: { created: Date.now() },
+                agent: lastUser.agent,
+                model: lastUser.model,
+              })) as MessageV2.User
+
+              const counterSummary = verification.contradicting
+                .slice(0, 3)
+                .map((item) => item.attribution)
+                .join("; ")
+              await Session.updatePart({
+                id: PartID.ascending(),
+                messageID: summaryUserMsg.id,
+                sessionID,
+                type: "text",
+                text: [
+                  "<system-reminder>",
+                  `Verification verdict: ${verification.verdict}.`,
+                  counterSummary ? `Counter-evidence: ${counterSummary}` : "The answer is not yet sufficiently supported.",
+                  "Revise the answer to resolve unsupported claims before finalizing.",
+                  "</system-reminder>",
+                ].join("\n"),
+                synthetic: true,
+              })
+              continue
+            }
+          }
+          await LearningStore.finishTask(session.projectID, verification?.verdict !== "contradicted")
         }
       }
 
@@ -925,7 +1702,7 @@ export namespace SessionPrompt {
     throw new Error("Impossible")
   })
 
-  async function lastModel(sessionID: string) {
+  async function lastModel(sessionID: SessionID) {
     for await (const item of MessageV2.stream(sessionID)) {
       if (item.info.role === "user" && item.info.model) return item.info.model
     }
@@ -942,6 +1719,7 @@ export namespace SessionPrompt {
     bypassAgentCheck: boolean
     messages: MessageV2.WithParts[]
     sdAgent?: SelfDrivenAgent
+    intent?: TaskIntent
   }) {
     using _ = log.time("resolveTools")
     const tools: Record<string, AITool> = {}
@@ -990,10 +1768,53 @@ export namespace SessionPrompt {
       },
     })
 
-    for (const item of await ToolRegistry.tools(
-      { modelID: input.model.api.id, providerID: input.model.providerID },
+    const builtinDefinitions = await ToolRegistry.tools(
+      { modelID: ModelID.make(input.model.api.id), providerID: input.model.providerID },
       input.agent,
-    )) {
+    )
+
+    const rawMcpTools = await MCP.tools({
+      sessionID: input.session.id,
+      task: currentTask || undefined,
+      preferredCategory: prefersImageTools ? "image" : undefined,
+    })
+    const mcpCapabilities = new Map(getMCPRouter(input.session.id).getAllTools().map((tool) => [tool.toolId, tool]))
+    const toolDescriptors = await ToolBroker.enrichDescriptors({
+      projectID: input.session.projectID,
+      tools: [
+        ...builtinDefinitions.map((item) => ({
+          id: item.id,
+          description: item.description,
+          source: item.id === "skill" ? ("skill" as const) : item.id === "task" ? ("subagent" as const) : ("builtin" as const),
+        })),
+        ...Object.entries(rawMcpTools)
+          .filter(([, item]) => !!item.execute)
+          .map(([key, item]) => ({
+            id: key,
+            description: item.description ?? "",
+            source: key.startsWith("web") ? ("web" as const) : ("mcp" as const),
+            category: mcpCapabilities.get(key)?.category,
+            available: mcpCapabilities.get(key)?.available,
+            historicalSuccess: mcpCapabilities.get(key)?.successRates.at(-1),
+            averageLatencyMs: mcpCapabilities.get(key)?.responseTimes.at(-1),
+            tags: mcpCapabilities.get(key)?.tags,
+            preferredTaskTypes: mcpCapabilities.get(key)?.suitableTaskTypes,
+          })),
+      ],
+    })
+    const rankedDecision = ToolBroker.decide({
+      intent: input.intent ?? IntentDetection.detect(currentTask || "implement the requested task"),
+      agent: input.agent,
+      currentTask,
+      tools: toolDescriptors,
+    })
+
+    const builtinOrder = ToolBroker.sortTools(
+      builtinDefinitions.map((item) => ({ id: item.id, item })),
+      rankedDecision,
+    )
+
+    for (const { item } of builtinOrder) {
       const schema = ProviderTransform.schema(input.model, z.toJSONSchema(item.parameters))
       tools[item.id] = tool({
         id: item.id as any,
@@ -1001,6 +1822,7 @@ export namespace SessionPrompt {
         inputSchema: jsonSchema(schema as any),
         async execute(args, options) {
           const ctx = context(args, options)
+          const started = Date.now()
           await Plugin.trigger(
             "tool.execute.before",
             {
@@ -1012,45 +1834,100 @@ export namespace SessionPrompt {
               args,
             },
           )
-          const result = await item.execute(args, ctx)
-          
-          if (input.sdAgent) {
-             await input.sdAgent.onAfterToolExecution(item.id, true, JSON.stringify(result))
-          }
+          try {
+            const result = await item.execute(args, ctx)
 
-          const output = {
-            ...result,
-            attachments: result.attachments?.map((attachment) => ({
-              ...attachment,
-              id: Identifier.ascending("part"),
-              sessionID: ctx.sessionID,
-              messageID: input.processor.message.id,
-            })),
-          }
-          await Plugin.trigger(
-            "tool.execute.after",
-            {
+            if (input.sdAgent) {
+              await input.sdAgent.onAfterToolExecution(item.id, true, JSON.stringify(result))
+            }
+            await WorkflowOrchestrator.noteTool(input.session.id, item.id, { success: true })
+            await LearningStore.recordToolExecution({
+              projectID: input.session.projectID,
+              rootDir: Instance.project.worktree,
+              taskType: input.intent?.type ?? "general",
               tool: item.id,
-              sessionID: ctx.sessionID,
-              callID: ctx.callID,
-              args,
-            },
-            output,
-          )
-          return output
+              success: true,
+              description: item.description,
+              output: JSON.stringify(result),
+              duration: Date.now() - started,
+              complexity: input.intent?.type === "implementation" ? input.intent.complexity : undefined,
+            })
+            await ToolBroker.recordToolOutcome({
+              projectID: input.session.projectID,
+              tool: item.id,
+              source: item.id === "skill" ? "skill" : item.id === "task" ? "subagent" : "builtin",
+              success: true,
+              durationMs: Date.now() - started,
+            })
+
+            const output = {
+              ...result,
+              attachments: result.attachments?.map((attachment) => ({
+                ...attachment,
+                id: PartID.ascending(),
+                sessionID: ctx.sessionID,
+                messageID: input.processor.message.id,
+              })),
+            }
+            await Plugin.trigger(
+              "tool.execute.after",
+              {
+                tool: item.id,
+                sessionID: ctx.sessionID,
+                callID: ctx.callID,
+                args,
+              },
+              output,
+            )
+            return output
+          } catch (error) {
+            if (input.sdAgent) {
+              await input.sdAgent.onAfterToolExecution(
+                item.id,
+                false,
+                error instanceof Error ? error.message : String(error),
+              )
+            }
+            await WorkflowOrchestrator.noteTool(input.session.id, item.id, { success: false })
+            await LearningStore.recordToolExecution({
+              projectID: input.session.projectID,
+              rootDir: Instance.project.worktree,
+              taskType: input.intent?.type ?? "general",
+              tool: item.id,
+              success: false,
+              description: item.description,
+              output: error instanceof Error ? error.message : String(error),
+              duration: Date.now() - started,
+              complexity: input.intent?.type === "implementation" ? input.intent.complexity : undefined,
+            })
+            await ToolBroker.recordToolOutcome({
+              projectID: input.session.projectID,
+              tool: item.id,
+              source: item.id === "skill" ? "skill" : item.id === "task" ? "subagent" : "builtin",
+              success: false,
+              durationMs: Date.now() - started,
+            })
+            await ProjectMemory.rememberToolFailure({
+              projectID: input.session.projectID,
+              tool: item.id,
+              taskType: input.intent?.type ?? "general",
+              message: error instanceof Error ? error.message : String(error),
+              evidence: currentTask ? [currentTask.slice(0, 200)] : undefined,
+            })
+            throw error
+          }
         },
       })
     }
 
-    for (
-      const [key, item] of Object.entries(
-        await MCP.tools({
-          sessionID: input.session.id,
-          task: currentTask || undefined,
-          preferredCategory: prefersImageTools ? "image" : undefined,
-        }),
-      )
-    ) {
+    const mcpOrder = ToolBroker.sortTools(
+      Object.entries(rawMcpTools)
+        .filter(([, item]) => !!item.execute)
+        .map(([id, item]) => ({ id, item })),
+      rankedDecision,
+    )
+
+    for (const { id: key, item } of mcpOrder) {
       const execute = item.execute
       if (!execute) continue
 
@@ -1059,6 +1936,7 @@ export namespace SessionPrompt {
       // Wrap execute to add plugin hooks and format output
       item.execute = async (args, opts) => {
         const ctx = context(args, opts)
+        const wrapperStarted = Date.now()
 
         await Plugin.trigger(
           "tool.execute.before",
@@ -1079,13 +1957,65 @@ export namespace SessionPrompt {
           always: ["*"],
         })
 
-        const started = Date.now()
         let result: Awaited<ReturnType<typeof execute>>
         try {
           result = await execute(args, opts)
-          mcpRouter.recordToolCall(key, true, Date.now() - started, ctx.sessionID)
+          mcpRouter.recordToolCall(key, true, Date.now() - wrapperStarted, ctx.sessionID)
+          if (input.sdAgent) {
+            await input.sdAgent.onAfterToolExecution(key, true, JSON.stringify(result))
+          }
+          await WorkflowOrchestrator.noteTool(input.session.id, key, { success: true })
+          await LearningStore.recordToolExecution({
+            projectID: input.session.projectID,
+            rootDir: Instance.project.worktree,
+            taskType: input.intent?.type ?? "general",
+            tool: key,
+            success: true,
+            description: item.description ?? "",
+            output: JSON.stringify(result),
+            duration: Date.now() - wrapperStarted,
+            complexity: input.intent?.type === "implementation" ? input.intent.complexity : undefined,
+          })
+          await ToolBroker.recordToolOutcome({
+            projectID: input.session.projectID,
+            tool: key,
+            source: key.startsWith("web") ? "web" : "mcp",
+            category: mcpCapabilities.get(key)?.category,
+            success: true,
+            durationMs: Date.now() - wrapperStarted,
+          })
         } catch (error) {
-          mcpRouter.recordToolCall(key, false, Date.now() - started, ctx.sessionID)
+          mcpRouter.recordToolCall(key, false, Date.now() - wrapperStarted, ctx.sessionID)
+          if (input.sdAgent) {
+            await input.sdAgent.onAfterToolExecution(key, false, error instanceof Error ? error.message : String(error))
+          }
+          await WorkflowOrchestrator.noteTool(input.session.id, key, { success: false })
+          await LearningStore.recordToolExecution({
+            projectID: input.session.projectID,
+            rootDir: Instance.project.worktree,
+            taskType: input.intent?.type ?? "general",
+            tool: key,
+            success: false,
+            description: item.description ?? "",
+            output: error instanceof Error ? error.message : String(error),
+            duration: Date.now() - wrapperStarted,
+            complexity: input.intent?.type === "implementation" ? input.intent.complexity : undefined,
+          })
+          await ToolBroker.recordToolOutcome({
+            projectID: input.session.projectID,
+            tool: key,
+            source: key.startsWith("web") ? "web" : "mcp",
+            category: mcpCapabilities.get(key)?.category,
+            success: false,
+            durationMs: Date.now() - wrapperStarted,
+          })
+          await ProjectMemory.rememberToolFailure({
+            projectID: input.session.projectID,
+            tool: key,
+            taskType: input.intent?.type ?? "general",
+            message: error instanceof Error ? error.message : String(error),
+            evidence: currentTask ? [currentTask.slice(0, 200)] : undefined,
+          })
           throw error
         }
 
@@ -1141,7 +2071,7 @@ export namespace SessionPrompt {
           output: truncated.content,
           attachments: attachments.map((attachment) => ({
             ...attachment,
-            id: Identifier.ascending("part"),
+            id: PartID.ascending(),
             sessionID: ctx.sessionID,
             messageID: input.processor.message.id,
           })),
@@ -1195,7 +2125,7 @@ export namespace SessionPrompt {
     const variant = input.variant ?? (agent.variant && full?.variants?.[agent.variant] ? agent.variant : undefined)
 
     const info: MessageV2.Info = {
-      id: input.messageID ?? Identifier.ascending("message"),
+      id: input.messageID ?? MessageID.ascending(),
       role: "user",
       sessionID: input.sessionID,
       time: {
@@ -1213,7 +2143,7 @@ export namespace SessionPrompt {
     type Draft<T> = T extends MessageV2.Part ? Omit<T, "id"> & { id?: string } : never
     const assign = (part: Draft<MessageV2.Part>): MessageV2.Part => ({
       ...part,
-      id: part.id ?? Identifier.ascending("part"),
+      id: part.id ? PartID.make(part.id) : PartID.ascending(),
     })
 
     const parts = await Promise.all(
@@ -1303,7 +2233,7 @@ export namespace SessionPrompt {
                     sessionID: input.sessionID,
                     type: "text",
                     synthetic: true,
-                    text: Buffer.from(part.url, "base64url").toString(),
+                    text: decodeDataUrl(part.url),
                   },
                   {
                     ...part,
@@ -1560,7 +2490,7 @@ export namespace SessionPrompt {
     if (!Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE) {
       if (input.agent.name === "plan") {
         userMessage.parts.push({
-          id: Identifier.ascending("part"),
+          id: PartID.ascending(),
           messageID: userMessage.info.id,
           sessionID: userMessage.info.sessionID,
           type: "text",
@@ -1571,7 +2501,7 @@ export namespace SessionPrompt {
       const wasPlan = input.messages.some((msg) => msg.info.role === "assistant" && msg.info.agent === "plan")
       if (wasPlan && input.agent.name === "build") {
         userMessage.parts.push({
-          id: Identifier.ascending("part"),
+          id: PartID.ascending(),
           messageID: userMessage.info.id,
           sessionID: userMessage.info.sessionID,
           type: "text",
@@ -1591,7 +2521,7 @@ export namespace SessionPrompt {
       const exists = await Filesystem.exists(plan)
       if (exists) {
         const part = await Session.updatePart({
-          id: Identifier.ascending("part"),
+          id: PartID.ascending(),
           messageID: userMessage.info.id,
           sessionID: userMessage.info.sessionID,
           type: "text",
@@ -1610,7 +2540,7 @@ export namespace SessionPrompt {
       const exists = await Filesystem.exists(plan)
       if (!exists) await fs.mkdir(path.dirname(plan), { recursive: true })
       const part = await Session.updatePart({
-        id: Identifier.ascending("part"),
+        id: PartID.ascending(),
         messageID: userMessage.info.id,
         sessionID: userMessage.info.sessionID,
         type: "text",
@@ -1681,6 +2611,7 @@ At the very end of your turn, once you have asked the user questions and are hap
 This is critical - your turn should only end with either asking the user a question or calling plan_exit. Do not stop unless it's for these 2 reasons.
 
 **Important:** Use question tool to clarify requirements/approach, use plan_exit to request plan approval. Do NOT use question tool to ask "Is this plan okay?" - that's what plan_exit does.
+If the user has already said to proceed without another approval step, or you are operating in an autonomous workflow, call plan_exit with autoApprove=true and include a concise summary and/or satisfiedCriteria list. Do not use autoApprove if any material questions remain unanswered.
 
 NOTE: At any point in time through this workflow you should feel free to ask the user questions or clarifications. Don't make large assumptions about user intent. The goal is to present a well researched plan to the user, and tie any loose ends before implementation begins.
 </system-reminder>`,
@@ -1693,12 +2624,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
   }
 
   export const ShellInput = z.object({
-    sessionID: Identifier.schema("session"),
+    sessionID: SessionID.zod,
     agent: z.string(),
     model: z
       .object({
-        providerID: z.string(),
-        modelID: z.string(),
+        providerID: ProviderID.zod,
+        modelID: ModelID.zod,
       })
       .optional(),
     command: z.string(),
@@ -1730,7 +2661,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     const agent = await Agent.get(input.agent)
     const model = input.model ?? agent.model ?? (await lastModel(input.sessionID))
     const userMsg: MessageV2.User = {
-      id: Identifier.ascending("message"),
+      id: MessageID.ascending(),
       sessionID: input.sessionID,
       time: {
         created: Date.now(),
@@ -1745,7 +2676,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     await Session.updateMessage(userMsg)
     const userPart: MessageV2.Part = {
       type: "text",
-      id: Identifier.ascending("part"),
+      id: PartID.ascending(),
       messageID: userMsg.id,
       sessionID: input.sessionID,
       text: "The following tool was executed by the user",
@@ -1754,7 +2685,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     await Session.updatePart(userPart)
 
     const msg: MessageV2.Assistant = {
-      id: Identifier.ascending("message"),
+      id: MessageID.ascending(),
       sessionID: input.sessionID,
       parentID: userMsg.id,
       mode: input.agent,
@@ -1780,7 +2711,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     await Session.updateMessage(msg)
     const part: MessageV2.Part = {
       type: "tool",
-      id: Identifier.ascending("part"),
+      id: PartID.ascending(),
       messageID: msg.id,
       sessionID: input.sessionID,
       tool: "bash",
@@ -1860,6 +2791,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     const proc = spawn(shell, args, {
       cwd,
       detached: process.platform !== "win32",
+      windowsHide: process.platform === "win32",
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
@@ -1943,8 +2875,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
   }
 
   export const CommandInput = z.object({
-    messageID: Identifier.schema("message").optional(),
-    sessionID: Identifier.schema("session"),
+    messageID: MessageID.zod.optional(),
+    sessionID: SessionID.zod,
     agent: z.string().optional(),
     model: z.string().optional(),
     arguments: z.string(),
@@ -2122,8 +3054,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
   async function ensureTitle(input: {
     session: Session.Info
     history: MessageV2.WithParts[]
-    providerID: string
-    modelID: string
+    providerID: ProviderID
+    modelID: ModelID
   }) {
     if (input.session.parentID) return
     if (!Session.isDefaultTitle(input.session.title)) return

@@ -138,14 +138,21 @@ describe("AsyncQueue", () => {
 
       const next1 = queue.next()
       const next2 = queue.next()
+      const next1Error = next1.then(
+        () => null,
+        (error) => error as Error,
+      )
+      const next2Error = next2.then(
+        () => null,
+        (error) => error as Error,
+      )
 
       await new Promise((r) => setTimeout(r, 5))
 
       queue.clear()
 
-      // Should reject with error
-      await expect(next1).rejects.toThrow("Queue cleared")
-      await expect(next2).rejects.toThrow("Queue cleared")
+      expect((await next1Error)?.message).toBe("Queue cleared")
+      expect((await next2Error)?.message).toBe("Queue cleared")
     })
   })
 
@@ -157,15 +164,18 @@ describe("AsyncQueue", () => {
 
       const next1 = queue.next()
       const next2 = queue.next()
+      const next2Error = next2.then(
+        () => null,
+        (error) => error as Error,
+      )
 
       await new Promise((r) => setTimeout(r, 5))
 
       const drained = queue.drain(new Error("Drained"))
 
-      expect(drained).toBe(3) // 1 queued + 2 waiting
-
-      await expect(next1).rejects.toThrow("Drained")
-      await expect(next2).rejects.toThrow("Drained")
+      expect(drained).toBe(1)
+      await expect(next1).resolves.toBe("item1")
+      expect((await next2Error)?.message).toBe("Drained")
     })
   })
 
@@ -206,7 +216,7 @@ describe("AsyncQueue", () => {
       await Promise.all(pushPromises)
 
       // All items should be received
-      expect(results.sort()).toEqual(Array.from({ length: 100 }, (_, i) => i))
+      expect([...results].sort((a, b) => a - b)).toEqual(Array.from({ length: 100 }, (_, i) => i))
     })
   })
 })
@@ -220,7 +230,7 @@ describe("WorkPool", () => {
 
       const results = await pool.process([1, 2, 3, 4])
 
-      expect(results.sort()).toEqual([2, 4, 6, 8])
+      expect(results).toEqual([2, 4, 6, 8])
     })
 
     test("processes in order", async () => {
@@ -278,7 +288,7 @@ describe("WorkPool", () => {
       })
 
       expect(maxActive).toBe(3)
-      expect(results.sort()).toEqual([1, 2, 3, 4, 5, 6])
+      expect(results).toEqual([1, 2, 3, 4, 5, 6])
     })
   })
 })
@@ -297,7 +307,7 @@ describe("work function", () => {
     })
 
     expect(maxRunning).toBe(3)
-    expect(results.sort()).toEqual([2, 4, 6, 8, 10, 12, 14, 16, 18, 20])
+    expect(results).toEqual([2, 4, 6, 8, 10, 12, 14, 16, 18, 20])
   })
 
   test("handles empty array", async () => {
@@ -314,6 +324,6 @@ describe("work function", () => {
 describe("boundedWork function", () => {
   test("works like work function", async () => {
     const results = await boundedWork(2, [1, 2, 3], async (item) => item * 2)
-    expect(results.sort()).toEqual([2, 4, 6])
+    expect(results).toEqual([2, 4, 6])
   })
 })

@@ -701,7 +701,6 @@ function App() {
     }
   })
 
-  // 保存事件监听器的取消订阅函数
   const cleanups: Array<() => void> = []
 
   cleanups.push(

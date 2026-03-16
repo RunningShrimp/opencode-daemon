@@ -39,6 +39,58 @@ export const Plan = z.object({
 
 export type Plan = z.infer<typeof Plan>
 
+export interface PlanExecutionAnalysis {
+  readyTasks: PlanningTask[]
+  stalled: boolean
+  reasons: string[]
+}
+
+function allTasks(plan: Plan) {
+  return plan.steps.flatMap((step) => step.tasks)
+}
+
+function taskMap(plan: Plan) {
+  return new Map(allTasks(plan).map((task) => [task.id, task]))
+}
+
+function findDependencyCycles(tasks: Map<string, PlanningTask>) {
+  const visiting = new Set<string>()
+  const visited = new Set<string>()
+  const stack: string[] = []
+  const cycles = new Set<string>()
+
+  const visit = (taskID: string) => {
+    if (visited.has(taskID)) return
+    if (visiting.has(taskID)) {
+      const cycleStart = stack.indexOf(taskID)
+      if (cycleStart >= 0) {
+        const cycle = [...stack.slice(cycleStart), taskID]
+        cycles.add(cycle.join(" -> "))
+      }
+      return
+    }
+
+    const task = tasks.get(taskID)
+    if (!task) return
+
+    visiting.add(taskID)
+    stack.push(taskID)
+    for (const depID of task.dependencies) {
+      if (!tasks.has(depID)) continue
+      visit(depID)
+    }
+    stack.pop()
+    visiting.delete(taskID)
+    visited.add(taskID)
+  }
+
+  for (const taskID of tasks.keys()) {
+    visit(taskID)
+  }
+
+  return [...cycles]
+}
+
 export function createPlanningTask(
   description: string,
   priority: PlanningTask["priority"] = "medium",
@@ -88,6 +140,7 @@ export function createPlan(sessionId: string, goal: string, steps: PlanningStep[
 
 export function validatePlan(plan: Plan): { valid: boolean; errors: string[] } {
   const errors: string[] = []
+  const tasks = taskMap(plan)
 
   if (!plan.goal.trim()) {
     errors.push("Plan goal cannot be empty")
@@ -98,6 +151,7 @@ export function validatePlan(plan: Plan): { valid: boolean; errors: string[] } {
   }
 
   const stepNumbers = new Set<number>()
+  const taskIDs = new Set<string>()
   for (const step of plan.steps) {
     if (stepNumbers.has(step.stepNumber)) {
       errors.push(`Duplicate step number: ${step.stepNumber}`)
@@ -105,13 +159,26 @@ export function validatePlan(plan: Plan): { valid: boolean; errors: string[] } {
     stepNumbers.add(step.stepNumber)
 
     for (const task of step.tasks) {
+      if (taskIDs.has(task.id)) {
+        errors.push(`Duplicate task id: ${task.id}`)
+      }
+      taskIDs.add(task.id)
+
+      if (task.dependencies.includes(task.id)) {
+        errors.push(`Task ${task.id} cannot depend on itself`)
+      }
+
       for (const depId of task.dependencies) {
-        const depExists = plan.steps.some((s) => s.tasks.some((t) => t.id === depId))
+        const depExists = tasks.has(depId)
         if (!depExists) {
           errors.push(`Task ${task.id} has invalid dependency: ${depId}`)
         }
       }
     }
+  }
+
+  for (const cycle of findDependencyCycles(tasks)) {
+    errors.push(`Dependency cycle detected: ${cycle}`)
   }
 
   return { valid: errors.length === 0, errors }
@@ -136,22 +203,57 @@ export function updateTaskStatus(plan: Plan, taskId: string, status: PlanningTas
 }
 
 export function calculateProgress(plan: Plan): number {
-  const allTasks = plan.steps.flatMap((s) => s.tasks)
-  if (allTasks.length === 0) return 0
+  const tasks = allTasks(plan)
+  if (tasks.length === 0) return 0
 
-  const completedTasks = allTasks.filter((t) => t.status === "completed").length
-  return Math.round((completedTasks / allTasks.length) * 100)
+  const completedTasks = tasks.filter((t) => t.status === "completed").length
+  return Math.round((completedTasks / tasks.length) * 100)
 }
 
-export function getNextPendingTasks(plan: Plan): PlanningTask[] {
-  const allTasks = plan.steps.flatMap((s) => s.tasks)
-  return allTasks.filter((task) => {
+export function analyzePlanExecution(plan: Plan): PlanExecutionAnalysis {
+  const tasks = allTasks(plan)
+  const taskIndex = new Map(tasks.map((task) => [task.id, task]))
+  const readyTasks = tasks.filter((task) => {
     if (task.status !== "pending") return false
     return task.dependencies.every((depId) => {
-      const depTask = allTasks.find((t) => t.id === depId)
+      const depTask = taskIndex.get(depId)
       return depTask?.status === "completed"
     })
   })
+
+  const pendingTasks = tasks.filter((task) => task.status === "pending")
+  const inProgressTasks = tasks.filter((task) => task.status === "in_progress")
+  const stalled = readyTasks.length === 0 && pendingTasks.length > 0 && inProgressTasks.length === 0
+  const reasons: string[] = []
+
+  if (stalled) {
+    const validation = validatePlan(plan)
+    reasons.push(...validation.errors)
+
+    for (const task of pendingTasks) {
+      const failedDeps = task.dependencies.filter((depId) => {
+        const depTask = taskIndex.get(depId)
+        return depTask?.status === "failed" || depTask?.status === "cancelled"
+      })
+      if (failedDeps.length > 0) {
+        reasons.push(`Task ${task.id} is blocked by failed dependencies: ${failedDeps.join(", ")}`)
+      }
+    }
+
+    if (reasons.length === 0) {
+      reasons.push("Pending tasks are blocked by unresolved dependencies with no ready task to execute")
+    }
+  }
+
+  return {
+    readyTasks,
+    stalled,
+    reasons: [...new Set(reasons)],
+  }
+}
+
+export function getNextPendingTasks(plan: Plan): PlanningTask[] {
+  return analyzePlanExecution(plan).readyTasks
 }
 
 export function activatePlan(plan: Plan): Plan {

@@ -114,6 +114,7 @@ export namespace LSP {
             return {
               process: spawn(item.command[0], item.command.slice(1), {
                 cwd: root,
+                windowsHide: true,
                 env: {
                   ...process.env,
                   ...item.env,
@@ -276,16 +277,18 @@ export namespace LSP {
 
   export async function touchFile(input: string, waitForDiagnostics?: boolean) {
     log.info("touching file", { file: input })
-    const clients = await getClients(input)
-    await Promise.all(
-      clients.map(async (client) => {
-        const wait = waitForDiagnostics ? client.waitForDiagnostics({ path: input }) : Promise.resolve()
-        await client.notify.open({ path: input })
-        return wait
-      }),
-    ).catch((err) => {
+    try {
+      const clients = await getClients(input)
+      await Promise.all(
+        clients.map(async (client) => {
+          const wait = waitForDiagnostics ? client.waitForDiagnostics({ path: input }) : Promise.resolve()
+          await client.notify.open({ path: input })
+          return wait
+        }),
+      )
+    } catch (err) {
       log.error("failed to touch file", { err, file: input })
-    })
+    }
   }
 
   export async function diagnostics() {

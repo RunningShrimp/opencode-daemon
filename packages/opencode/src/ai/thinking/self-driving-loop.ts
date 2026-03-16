@@ -1,16 +1,15 @@
 import { TreeOfThought, type LLMClient } from "./tree-of-thought"
 import { SelfMonitor, AgentState } from "./self-monitor"
-import { MetacognitionEngine } from "./metacognition"
+import { MetacognitionEngine, ReasoningStrategy } from "./metacognition"
 import { GoalManager, GoalStatus, GoalPriority } from "./goal-manager"
 import type { Goal } from "./goal-manager"
 import { ExperienceLearning } from "./experience-learning"
 import type { Hypothesis } from "./evidence"
 import type { TaskIntent } from "./intent"
 import { Log } from "@/util/log"
+import { QualityGate } from "@/ai/workflow/quality-gate"
 
 // import { SelfReviewWorkflow } from "@/ai/workflow/self-review-workflow"
-// import { QualityGate } from "@/ai/workflow/quality-gate"
-
 // import { ThoughtNodeStorage } from "@/ai/thinking/thought-storage"
 // import { ThinkTreeUI } from "@/cli/cmd/tui/components/think-tree-ui"
 
@@ -79,8 +78,8 @@ export class SelfDrivingLoop {
   private stepCount: number = 0
   private decisionHistory: LoopDecision[] = []
   private progressHistory: GoalProgressState[] = []
+  private qualityGate: QualityGate
   // private workflow: SelfReviewWorkflow
-  // private qualityGate: QualityGate
   // private thoughtStorage: ThoughtNodeStorage
   // private thinkTreeUI: ThinkTreeUI
   private tot: TreeOfThought
@@ -91,8 +90,8 @@ export class SelfDrivingLoop {
     this.metacognition = new MetacognitionEngine(this.monitor)
     this.goalManager = new GoalManager()
     this.experienceLearning = new ExperienceLearning()
+    this.qualityGate = new QualityGate()
     // this.workflow = new SelfReviewWorkflow()
-    // this.qualityGate = new QualityGate()
     // this.thoughtStorage = new ThoughtNodeStorage()
     // this.thinkTreeUI = new ThinkTreeUI()
     this.tot = new TreeOfThought()
@@ -189,25 +188,59 @@ export class SelfDrivingLoop {
         }
     }
   }
-  async act(): Promise<void> {
+  async act(): Promise<string | undefined> {
     this.monitor.transitionState(AgentState.EXECUTING)
+    // Surface the most recent high-confidence decision as execution guidance
+    const pending = this.loopState.pendingDecisions
+    if (pending.length > 0) {
+      const latest = pending[pending.length - 1]
+      if ((latest.confidence ?? 0) >= 0.6 && latest.reasoning) {
+        return latest.reasoning
+      }
+    }
+    // Fall back to surfacing recent metacognitive insights
+    const recentInsights = this.loopState.context["recentInsights"] as string[] | undefined
+    if (recentInsights?.length) {
+      return `Strategy: ${recentInsights.slice(-2).join("; ")}`
+    }
+    return undefined
   }
   
   async reflect(): Promise<void> {
     this.monitor.transitionState(AgentState.REFLECTING)
     try {
-        const reflection = await this.metacognition.reflect("Periodic reflection")
-        this.loopState.lastReflection = Date.now()
-        this.loopState.context["recentInsights"] = reflection.insights
-        
-        // Learn from reflection
-        this.experienceLearning.learnFromReflection({
-            insights: reflection.insights,
-            strategyAdjustments: reflection.strategyAdjustments.map(s => `${s.previousStrategy} -> ${s.newStrategy}`),
-            newHypotheses: reflection.newHypotheses.map(h => h.statement)
-        }, this.loopState.context)
+      const reflection = await this.metacognition.reflect("Periodic reflection")
+      this.loopState.lastReflection = Date.now()
+      this.loopState.context["recentInsights"] = reflection.insights
+
+      // Apply strategy adjustments: switch the active reasoning strategy
+      if (reflection.strategyAdjustments.length > 0) {
+        const latest = reflection.strategyAdjustments[reflection.strategyAdjustments.length - 1]
+        this.loopState.context["activeStrategy"] = latest.newStrategy
+        log.info("Reasoning strategy switched", {
+          from: latest.previousStrategy,
+          to: latest.newStrategy,
+          reason: latest.reason,
+        })
+
+        // Record adjustment outcome into metacognition so future selections are informed
+        if (latest.previousStrategy !== latest.newStrategy) {
+          this.metacognition.recordStrategyFailure(latest.previousStrategy)
+          this.metacognition.recordStrategySuccess(latest.newStrategy)
+        }
+      }
+
+      // Learn from reflection using updated strategy labels
+      this.experienceLearning.learnFromReflection(
+        {
+          insights: reflection.insights,
+          strategyAdjustments: reflection.strategyAdjustments.map((s) => `${s.previousStrategy} -> ${s.newStrategy}`),
+          newHypotheses: reflection.newHypotheses.map((h) => h.statement),
+        },
+        this.loopState.context,
+      )
     } catch (error) {
-        log.error("Reflection failed", { error })
+      log.error("Reflection failed", { error })
     }
   }
   
@@ -218,19 +251,48 @@ export class SelfDrivingLoop {
   async adapt(): Promise<void> {
     this.monitor.transitionState(AgentState.ADAPTING)
     try {
-        const adaptations = this.goalManager.adaptGoals("Automatic adaptation triggered")
-        if (adaptations.length > 0) {
-            log.info("Goals adapted", { adaptations })
-            this.loopState.context["lastAdaptation"] = adaptations
-            
-            // If goals were split or refined, update current goal reference if needed
-            if (this.loopState.currentGoal) {
-                const updated = this.goalManager.getGoal(this.loopState.currentGoal.id)
-                if (updated) this.loopState.currentGoal = updated
-            }
+      const adaptations = this.goalManager.adaptGoals("Automatic adaptation triggered")
+      if (adaptations.length > 0) {
+        log.info("Goals adapted", { adaptations })
+        this.loopState.context["lastAdaptation"] = adaptations
+
+        // If goals were split or refined, update current goal reference if needed
+        if (this.loopState.currentGoal) {
+          const updated = this.goalManager.getGoal(this.loopState.currentGoal.id)
+          if (updated) this.loopState.currentGoal = updated
         }
+      }
+
+      // Gate check: evaluate quality of the current loop progress
+      const monitorState = this.monitor.getState()
+      const completenessScore = Math.round(
+        Math.min(100, this.getProgress() * 70 + (monitorState.confidence ?? 0) * 30),
+      )
+      const findings: Array<{ severity: string; message?: string }> = []
+      if (monitorState.consecutiveErrors > 0) {
+        findings.push({ severity: "error", message: `${monitorState.consecutiveErrors} consecutive tool error(s)` })
+      }
+      if (this.getProgress() < 0.3 && this.stepCount > 10) {
+        findings.push({ severity: "critical", message: "Low progress after many steps — possible stuck loop" })
+      }
+      const gateDecision = this.qualityGate.check({ completenessScore, findings })
+      this.loopState.context["gateDecision"] = gateDecision
+
+      if (!gateDecision.pass) {
+        log.warn("Quality gate failed during adaptation", { reason: gateDecision.reason, score: completenessScore })
+        // Switch to a more conservative strategy if gate fails
+        const currentStrategy = (this.loopState.context["activeStrategy"] as ReasoningStrategy | undefined) ?? ReasoningStrategy.DEDUCTIVE
+        if (currentStrategy !== ReasoningStrategy.HYPOTHETICAL) {
+          this.loopState.context["activeStrategy"] = ReasoningStrategy.HYPOTHETICAL
+          log.info("Falling back to HYPOTHETICAL strategy after gate failure")
+        }
+        // Escalate by requesting user input when stuck
+        if (findings.some((f) => f.severity === "critical")) {
+          this.monitor.transitionState(AgentState.WAITING_FOR_INPUT)
+        }
+      }
     } catch (error) {
-        log.error("Adaptation failed", { error })
+      log.error("Adaptation failed", { error })
     }
   }
   

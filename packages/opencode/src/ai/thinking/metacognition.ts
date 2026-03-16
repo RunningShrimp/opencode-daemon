@@ -67,6 +67,23 @@ export class MetacognitionEngine {
   private reasoningDepth: number = 0
   private maxReasoningDepth: number = 5
 
+  private static readonly strategyPatternIds: Record<ReasoningStrategy, string[]> = {
+    [ReasoningStrategy.DEDUCTIVE]: ["pattern-2", "pattern-1"],
+    [ReasoningStrategy.INDUCTIVE]: ["pattern-3"],
+    [ReasoningStrategy.ABDUCTIVE]: ["pattern-5"],
+    [ReasoningStrategy.ANALOGICAL]: ["pattern-4"],
+    [ReasoningStrategy.CAUSAL]: ["pattern-1", "pattern-2"],
+    [ReasoningStrategy.HYPOTHETICAL]: ["pattern-5", "pattern-3"],
+  }
+
+  private static readonly patternStrategy: Record<string, ReasoningStrategy> = {
+    "pattern-1": ReasoningStrategy.CAUSAL,
+    "pattern-2": ReasoningStrategy.DEDUCTIVE,
+    "pattern-3": ReasoningStrategy.INDUCTIVE,
+    "pattern-4": ReasoningStrategy.ANALOGICAL,
+    "pattern-5": ReasoningStrategy.HYPOTHETICAL,
+  }
+
   constructor(monitor: SelfMonitor) {
     this.monitor = monitor
     this.initializePatterns()
@@ -152,13 +169,14 @@ export class MetacognitionEngine {
 
     const topPattern = patterns[0]
     this.updatePatternFrequency(topPattern.id)
-    this.reasoningHistory.push(ReasoningStrategy.DEDUCTIVE)
+    const selected = MetacognitionEngine.patternStrategy[topPattern.id] ?? ReasoningStrategy.DEDUCTIVE
+    this.reasoningHistory.push(selected)
 
     if (this.reasoningHistory.length > 50) {
       this.reasoningHistory.shift()
     }
 
-    return ReasoningStrategy.DEDUCTIVE
+    return selected
   }
 
   private updatePatternFrequency(patternId: string): void {
@@ -170,23 +188,27 @@ export class MetacognitionEngine {
   }
 
   recordStrategySuccess(strategy: ReasoningStrategy): void {
-    const pattern = Array.from(this.cognitivePatterns.values()).find((p) =>
-      p.applicableContexts.includes(strategy.toString()),
-    )
-    if (pattern) {
+    const targets = this.getPatternsForStrategy(strategy)
+    for (const pattern of targets) {
       pattern.successRate = (pattern.successRate * pattern.frequency + 1) / (pattern.frequency + 1)
       this.updatePatternEffectiveness(pattern.id, 0.05)
     }
   }
 
   recordStrategyFailure(strategy: ReasoningStrategy): void {
-    const pattern = Array.from(this.cognitivePatterns.values()).find((p) =>
-      p.applicableContexts.includes(strategy.toString()),
-    )
-    if (pattern) {
+    const targets = this.getPatternsForStrategy(strategy)
+    for (const pattern of targets) {
       pattern.successRate = (pattern.successRate * pattern.frequency) / (pattern.frequency + 1)
       this.updatePatternEffectiveness(pattern.id, -0.1)
     }
+  }
+
+  private getPatternsForStrategy(strategy: ReasoningStrategy): CognitivePattern[] {
+    const preferredIds = MetacognitionEngine.strategyPatternIds[strategy]
+    if (!preferredIds || preferredIds.length === 0) return []
+    return preferredIds
+      .map((id) => this.cognitivePatterns.get(id))
+      .filter((pattern): pattern is CognitivePattern => !!pattern)
   }
 
   private updatePatternEffectiveness(patternId: string, delta: number): void {

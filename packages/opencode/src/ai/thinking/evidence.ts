@@ -57,6 +57,57 @@ export const Evidence = z.object({
 
 export type Evidence = z.infer<typeof Evidence>
 
+export const SourceAttribution = z.object({
+  kind: z.enum(["file", "tool", "web", "search", "memory", "unknown"]),
+  label: z.string(),
+  filePath: z.string().optional(),
+  startLine: z.number().int().positive().optional(),
+  endLine: z.number().int().positive().optional(),
+  tool: z.string().optional(),
+  url: z.string().optional(),
+  location: z.string().optional(),
+})
+
+export type SourceAttribution = z.infer<typeof SourceAttribution>
+
+export const EvidenceItem = z.object({
+  id: z.string(),
+  source: z.nativeEnum(EvidenceSource),
+  content: z.string(),
+  relevance: z.number().min(0).max(1),
+  timestamp: z.number(),
+  quote: z.string().optional(),
+  contradicts: z.boolean().default(false),
+  attribution: SourceAttribution,
+  metadata: z.record(z.string(), z.unknown()).optional(),
+})
+
+export type EvidenceItem = z.infer<typeof EvidenceItem>
+
+export const ClaimRecord = z.object({
+  id: z.string(),
+  claim: z.string(),
+  confidence: z.number().min(0).max(1),
+  evidence: z.array(EvidenceItem),
+  counterEvidence: z.array(EvidenceItem).default([]),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  source: z.enum(["retrieval", "tool", "verification", "reasoning", "user"]),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+})
+
+export type ClaimRecord = z.infer<typeof ClaimRecord>
+
+export const EvidenceLedgerSnapshot = z.object({
+  version: z.literal(1),
+  sessionID: z.string(),
+  projectID: z.string(),
+  claims: z.array(ClaimRecord),
+  updatedAt: z.number(),
+})
+
+export type EvidenceLedgerSnapshot = z.infer<typeof EvidenceLedgerSnapshot>
+
 /**
  * Pessimistic check schema for hypothesis validation
  */
@@ -181,6 +232,38 @@ export function createEvidence(
     quote: options?.quote,
     location: options?.location,
     contradicts: options?.contradicts,
+  })
+}
+
+export function createSourceAttribution(input: SourceAttribution): SourceAttribution {
+  return SourceAttribution.parse(input)
+}
+
+export function createEvidenceItem(input: Omit<EvidenceItem, "id" | "timestamp"> & { id?: string; timestamp?: number }) {
+  return EvidenceItem.parse({
+    id: input.id ?? crypto.randomUUID(),
+    timestamp: input.timestamp ?? Date.now(),
+    ...input,
+  })
+}
+
+export function createClaimRecord(
+  input: Omit<ClaimRecord, "id" | "createdAt" | "updatedAt"> & { id?: string; createdAt?: number; updatedAt?: number },
+) {
+  const now = input.updatedAt ?? input.createdAt ?? Date.now()
+  return ClaimRecord.parse({
+    id: input.id ?? crypto.randomUUID(),
+    createdAt: input.createdAt ?? now,
+    updatedAt: input.updatedAt ?? now,
+    ...input,
+  })
+}
+
+export function createEvidenceLedgerSnapshot(input: Omit<EvidenceLedgerSnapshot, "version" | "updatedAt"> & { updatedAt?: number }) {
+  return EvidenceLedgerSnapshot.parse({
+    version: 1,
+    updatedAt: input.updatedAt ?? Date.now(),
+    ...input,
   })
 }
 

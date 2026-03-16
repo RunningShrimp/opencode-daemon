@@ -31,8 +31,8 @@ interface InstalledModule {
 type NetworkType = "china" | "global" | "unknown"
 
 export const MODULE_CONFIGS: Record<string, ModuleConfig> = {
-  "@lancedb/lancedb": {
-    name: "@lancedb/lancedb",
+  "@sochdb/sochdb": {
+    name: "@sochdb/sochdb",
     version: "latest",
     type: "native",
   },
@@ -141,7 +141,6 @@ export class ModuleLoader {
       this.pendingInstalls.delete(name)
     }
   }
-
 
   installInBackground(config: ModuleConfig): void {
     const { name } = config

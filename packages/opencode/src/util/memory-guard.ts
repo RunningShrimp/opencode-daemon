@@ -36,6 +36,7 @@ const DEFAULT_CONFIG: MemoryGuardConfig = {
 export namespace MemoryGuard {
   let config: MemoryGuardConfig = DEFAULT_CONFIG
   let intervalId: ReturnType<typeof setInterval> | undefined
+  let criticalExitTimeoutId: ReturnType<typeof setTimeout> | undefined
   let pressureCallbacks: Array<(level: MemoryPressureLevel) => void> = []
 
   // Singleton cleanup callback reference - registered only once to prevent memory leak
@@ -111,6 +112,11 @@ export namespace MemoryGuard {
   function checkMemory(): void {
     const pressure = getCurrentPressure()
 
+    if ((pressure.level !== "critical" || pressure.heapUsedMB <= config.hardLimitMB) && criticalExitTimeoutId) {
+      clearTimeout(criticalExitTimeoutId)
+      criticalExitTimeoutId = undefined
+    }
+
     if (pressure.level !== "normal") {
       log.warn("Memory pressure detected", pressure)
     }
@@ -138,15 +144,18 @@ export namespace MemoryGuard {
         global.gc()
       }
 
-      setTimeout(() => {
-        const afterGC = getCurrentPressure()
-        if (afterGC.heapUsedMB > config.hardLimitMB) {
-          log.error("Memory still critical after GC", {
-            heapUsedMB: afterGC.heapUsedMB,
-          })
-          process.exit(1)
-        }
-      }, 1000)
+      if (!criticalExitTimeoutId) {
+        criticalExitTimeoutId = setTimeout(() => {
+          criticalExitTimeoutId = undefined
+          const afterGC = getCurrentPressure()
+          if (afterGC.heapUsedMB > config.hardLimitMB) {
+            log.error("Memory still critical after GC", {
+              heapUsedMB: afterGC.heapUsedMB,
+            })
+            process.exit(1)
+          }
+        }, 1000)
+      }
     }
   }
 
@@ -172,6 +181,11 @@ export namespace MemoryGuard {
       clearInterval(intervalId)
       intervalId = undefined
     }
+
+    if (criticalExitTimeoutId) {
+      clearTimeout(criticalExitTimeoutId)
+      criticalExitTimeoutId = undefined
+    }
   }
 
   /**
@@ -186,6 +200,9 @@ export namespace MemoryGuard {
    * Reset the singleton cleanup callback (for testing purposes)
    */
   export function __resetForTesting(): void {
+    stop()
+    config = DEFAULT_CONFIG
+    pressureCallbacks = []
     cleanupCallback = null
   }
 

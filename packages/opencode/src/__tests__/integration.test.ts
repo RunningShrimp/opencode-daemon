@@ -104,7 +104,7 @@ describe("Integration: Self-Driving + Self-Review + Think-Tree", () => {
       createdAt: Date.now(),
     }
 
-    await expect(storage.saveNode(node, "test-session")).resolves.not.toThrow()
+    await expect(storage.saveNode(node, "test-session")).resolves.toBeUndefined()
   })
 
   test("End-to-end: All three phases work together", async () => {

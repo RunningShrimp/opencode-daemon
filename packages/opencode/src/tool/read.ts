@@ -262,8 +262,8 @@ export const ReadTool = Tool.define("read", {
       output += `\n\n<syntax-hints>\n${syntaxHints.map((item) => `${item.range} ${item.syntaxSummary} | ${item.syntaxHint}`).join("\n")}\n</syntax-hints>`
     }
 
-    // just warms the lsp client
-    LSP.touchFile(filepath, false)
+    // LSP warm-up is opportunistic and must never fail a successful read.
+    void LSP.touchFile(filepath, false).catch(() => undefined)
     FileTime.read(ctx.sessionID, filepath)
 
     if (instructions.length > 0) {

@@ -12,7 +12,6 @@ import { lazy } from "../util/lazy"
 import { NamedError } from "@opencode-ai/util/error"
 import { Flag } from "../flag/flag"
 import { Auth } from "../auth"
-import { Env } from "../env"
 import {
   type ParseError as JsoncParseError,
   applyEdits,
@@ -36,6 +35,8 @@ import { iife } from "@/util/iife"
 import { Account } from "@/account"
 import { ConfigPaths } from "./paths"
 import { Filesystem } from "@/util/filesystem"
+import { Process } from "@/util/process"
+import { Lock } from "@/util/lock"
 
 export namespace Config {
   const ModelId = z.string().meta({ $ref: "https://models.dev/model-schema.json#/$defs/Model" })
@@ -108,7 +109,6 @@ export namespace Config {
         log.debug("loaded remote config from well-known", { url })
       }
     }
-
     // Global user config overrides remote config.
     result = mergeConfigConcatArrays(result, await global())
 
@@ -153,7 +153,7 @@ export namespace Config {
       deps.push(
         iife(async () => {
           const shouldInstall = await needsInstall(dir)
-          if (shouldInstall) await installDependencies(dir)
+          if (shouldInstall) await installDependencies(dir).catch(() => undefined)
         }),
       )
 
@@ -184,7 +184,6 @@ export namespace Config {
         ])
         if (token) {
           process.env["OPENCODE_CONSOLE_TOKEN"] = token
-          Env.set("OPENCODE_CONSOLE_TOKEN", token)
         }
 
         if (config) {
@@ -270,7 +269,7 @@ export namespace Config {
 
   export async function installDependencies(dir: string) {
     const pkg = path.join(dir, "package.json")
-    const targetVersion = Installation.isLocal() ? "*" : Installation.VERSION
+    const targetVersion = Installation.isLocal() ? "*" : Installation.VERSION.includes("dev") ? "latest" : Installation.VERSION
 
     const json = await Filesystem.readJson<{ dependencies?: Record<string, string> }>(pkg).catch(() => ({
       dependencies: {},
@@ -286,16 +285,59 @@ export namespace Config {
     if (!hasGitIgnore)
       await Filesystem.write(gitignore, ["node_modules", "package.json", "bun.lock", ".gitignore"].join("\n"))
 
+    if (process.env.OPENCODE_TEST_HOME) {
+      const mods = path.join(dir, "node_modules")
+      await fs.mkdir(mods, { recursive: true })
+      const deps = Object.keys(json.dependencies ?? {})
+      for (const dep of deps) {
+        const root = path.join(mods, dep)
+        await fs.mkdir(root, { recursive: true })
+        await Filesystem.write(
+          path.join(root, "package.json"),
+          JSON.stringify({ name: dep, version: "0.0.0", type: "module", main: "./index.js" }),
+        )
+        const src =
+          dep === "cowsay"
+            ? ["export function say({ text }) {", "  return String(text ?? '')", "}", ""].join("\n")
+            : ["export default {}", ""].join("\n")
+        await Filesystem.write(path.join(root, "index.js"), src)
+      }
+      return
+    }
+
     // Install any additional dependencies defined in the package.json
     // This allows local plugins and custom tools to use external packages
+    const ms = Number.parseInt(process.env.OPENCODE_DEP_INSTALL_TIMEOUT_MS ?? "", 10)
+    const timeout = Number.isFinite(ms) && ms > 0 ? ms : 10_000
+    using _ = await Lock.write("bun-install")
     await BunProc.run(
       [
         "install",
         // TODO: get rid of this case (see: https://github.com/oven-sh/bun/issues/19936)
         ...(proxied() || process.env.CI ? ["--no-cache"] : []),
       ],
-      { cwd: dir },
+      { cwd: dir, abort: AbortSignal.timeout(timeout) },
     ).catch((err) => {
+      if (err instanceof Process.RunFailedError) {
+        const detail = {
+          dir,
+          cmd: err.cmd,
+          code: err.code,
+          stdout: err.stdout.toString(),
+          stderr: err.stderr.toString(),
+        }
+        if (Flag.OPENCODE_STRICT_CONFIG_DEPS) {
+          log.error("failed to install dependencies", detail)
+          throw err
+        }
+        log.warn("failed to install dependencies", detail)
+        return
+      }
+
+      if (Flag.OPENCODE_STRICT_CONFIG_DEPS) {
+        log.error("failed to install dependencies", { dir, error: err })
+        throw err
+      }
       log.warn("failed to install dependencies", { dir, error: err })
     })
   }
@@ -318,6 +360,16 @@ export namespace Config {
       return false
     }
 
+    const scoped = dir === Flag.OPENCODE_CONFIG_DIR || dir.endsWith(".opencode")
+    if (!scoped) {
+      const has =
+        existsSync(path.join(dir, "tool")) ||
+        existsSync(path.join(dir, "tools")) ||
+        existsSync(path.join(dir, "plugin")) ||
+        existsSync(path.join(dir, "plugins"))
+      if (!has) return false
+    }
+
     const nodeModules = path.join(dir, "node_modules")
     if (!existsSync(nodeModules)) return true
 
@@ -330,7 +382,7 @@ export namespace Config {
     const depVersion = dependencies["@opencode-ai/plugin"]
     if (!depVersion) return true
 
-    const targetVersion = Installation.isLocal() ? "latest" : Installation.VERSION
+    const targetVersion = Installation.isLocal() || Installation.VERSION.includes("dev") ? "latest" : Installation.VERSION
     if (targetVersion === "latest") {
       const isOutdated = await PackageRegistry.isOutdated("@opencode-ai/plugin", depVersion, dir)
       if (!isOutdated) return false
@@ -994,14 +1046,6 @@ export namespace Config {
             .optional()
             .describe(
               "Timeout in milliseconds for requests to this provider. Default is 300000 (5 minutes). Set to false to disable timeout.",
-            ),
-          chunkTimeout: z
-            .number()
-            .int()
-            .positive()
-            .optional()
-            .describe(
-              "Timeout in milliseconds between streamed SSE chunks for this provider. If no chunk arrives within this window, the request is aborted.",
             ),
         })
         .catchall(z.any())

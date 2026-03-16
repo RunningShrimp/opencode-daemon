@@ -9,8 +9,8 @@ describe("Self-Critique Tool", () => {
 
   describe("Tool Definition", () => {
     test("tool module exists", async () => {
-      const toolPath = join(__dirname, "../self-critique.ts")
-      expect(existsSync(toolPath) || existsSync(join(__dirname, "../self-critique.js"))).toBe(true)
+      const toolPath = join(__dirname, "../../../../ai/tools/self-critique.ts")
+      expect(existsSync(toolPath) || existsSync(join(__dirname, "../../../../ai/tools/self-critique.js"))).toBe(true)
     })
   })
 })

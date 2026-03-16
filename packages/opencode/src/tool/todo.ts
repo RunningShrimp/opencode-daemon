@@ -7,6 +7,7 @@ export const TodoWriteTool = Tool.define("todowrite", {
   description: DESCRIPTION_WRITE,
   parameters: z.object({
     todos: z.array(z.object(Todo.Info.shape)).describe("The updated todo list"),
+    markdownPath: z.string().optional().describe("Optional markdown file path to keep synchronized with this todo list"),
   }),
   async execute(params, ctx) {
     await ctx.ask({
@@ -19,6 +20,8 @@ export const TodoWriteTool = Tool.define("todowrite", {
     await Todo.update({
       sessionID: ctx.sessionID,
       todos: params.todos,
+      markdownPath: params.markdownPath,
+      messages: ctx.messages,
     })
     return {
       title: `${params.todos.filter((x) => x.status !== "completed").length} todos`,
@@ -41,7 +44,7 @@ export const TodoReadTool = Tool.define("todoread", {
       metadata: {},
     })
 
-    const todos = await Todo.get(ctx.sessionID)
+    const todos = await Todo.get(ctx.sessionID, { messages: ctx.messages })
     return {
       title: `${todos.filter((x) => x.status !== "completed").length} todos`,
       metadata: {

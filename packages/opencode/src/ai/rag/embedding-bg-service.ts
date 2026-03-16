@@ -1,7 +1,14 @@
 import { Log } from "@/util/log"
 import { Global } from "@/global"
-import { embeddingService } from "./embedding"
+import {
+  EMBEDDING_OUTPUT_DIMENSIONS,
+  embeddingService,
+  TransformersEmbeddingProvider,
+  type ExternalEmbeddingConfig,
+  type EmbeddingRuntimeState,
+} from "./embedding"
 import { BackgroundServiceManager, type IBackgroundService, type ServiceStatus } from "@/util/background-service"
+import { rebuildRegisteredProjects } from "./indexer"
 import path from "node:path"
 import { existsSync, mkdirSync } from "node:fs"
 
@@ -42,13 +49,131 @@ class InMemoryVectorCache {
   }
 }
 
+type EmbeddingBootstrapConfig =
+  | { mode: "fallback"; source: "env" | "default"; targetProvider: "fallback" }
+  | { mode: "transformers"; source: "env" | "default"; targetProvider: "transformers" }
+  | { mode: "external"; source: "env"; targetProvider: "openai" | "cohere" | "voyage"; config: ExternalEmbeddingConfig }
+
+function shouldUseFallbackEmbeddingByDefault() {
+  return typeof Bun !== "undefined"
+}
+
+function resolveEmbeddingBootstrapConfig(): EmbeddingBootstrapConfig {
+  const provider = process.env.OPENCODE_EMBEDDING_PROVIDER?.trim().toLowerCase()
+  if (!provider) {
+    if (shouldUseFallbackEmbeddingByDefault()) {
+      return { mode: "fallback", source: "default", targetProvider: "fallback" }
+    }
+    return { mode: "transformers", source: "default", targetProvider: "transformers" }
+  }
+
+  if (provider === "fallback") {
+    return { mode: "fallback", source: "env", targetProvider: "fallback" }
+  }
+
+  if (provider === "transformers") {
+    return { mode: "transformers", source: "env", targetProvider: "transformers" }
+  }
+
+  const model = process.env.OPENCODE_EMBEDDING_MODEL?.trim() || undefined
+  const baseUrl = process.env.OPENCODE_EMBEDDING_BASE_URL?.trim() || undefined
+  const dimensionsValue = process.env.OPENCODE_EMBEDDING_DIMENSIONS?.trim()
+  const dimensions = dimensionsValue ? Number.parseInt(dimensionsValue, 10) : undefined
+
+  if (dimensionsValue && (!Number.isFinite(dimensions) || (dimensions ?? 0) <= 0)) {
+    throw new Error(`Invalid OPENCODE_EMBEDDING_DIMENSIONS: ${dimensionsValue}`)
+  }
+
+  if (provider === "openai") {
+    const apiKey =
+      process.env.OPENCODE_OPENAI_API_KEY?.trim() ||
+      process.env.OPENAI_API_KEY?.trim() ||
+      process.env.OPENCODE_EMBEDDING_API_KEY?.trim()
+    if (!apiKey) {
+      throw new Error("OPENCODE_EMBEDDING_PROVIDER=openai requires OPENCODE_OPENAI_API_KEY or OPENAI_API_KEY")
+    }
+    return {
+      mode: "external",
+      source: "env",
+      targetProvider: "openai",
+      config: {
+        provider: "openai",
+        apiKey,
+        model,
+        baseUrl,
+        dimensions,
+      },
+    }
+  }
+
+  if (provider === "cohere") {
+    const apiKey =
+      process.env.OPENCODE_COHERE_API_KEY?.trim() ||
+      process.env.COHERE_API_KEY?.trim() ||
+      process.env.OPENCODE_EMBEDDING_API_KEY?.trim()
+    if (!apiKey) {
+      throw new Error("OPENCODE_EMBEDDING_PROVIDER=cohere requires OPENCODE_COHERE_API_KEY or COHERE_API_KEY")
+    }
+    return {
+      mode: "external",
+      source: "env",
+      targetProvider: "cohere",
+      config: {
+        provider: "cohere",
+        apiKey,
+        model,
+        baseUrl,
+        dimensions,
+      },
+    }
+  }
+
+  if (provider === "voyage") {
+    const apiKey =
+      process.env.OPENCODE_VOYAGE_API_KEY?.trim() ||
+      process.env.VOYAGE_API_KEY?.trim() ||
+      process.env.OPENCODE_EMBEDDING_API_KEY?.trim()
+    if (!apiKey) {
+      throw new Error("OPENCODE_EMBEDDING_PROVIDER=voyage requires OPENCODE_VOYAGE_API_KEY or VOYAGE_API_KEY")
+    }
+    return {
+      mode: "external",
+      source: "env",
+      targetProvider: "voyage",
+      config: {
+        provider: "voyage",
+        apiKey,
+        model,
+        baseUrl,
+        dimensions,
+      },
+    }
+  }
+
+  throw new Error(`Unsupported OPENCODE_EMBEDDING_PROVIDER=${provider}`)
+}
+
+export interface EmbeddingRuntimeContext {
+  serviceStatus: ServiceStatus
+  targetProvider: string
+  source: "env" | "default"
+  activeProvider: string
+  activeProviderKind: string
+  mode: EmbeddingRuntimeState["mode"]
+  lastError?: string
+}
+
 export class EmbeddingBackgroundService implements IBackgroundService {
   name = "embedding"
   priority = 10
   private status: ServiceStatus = "idle"
   private fallbackCache: InMemoryVectorCache = new InMemoryVectorCache()
-  private reindexCallbacks: Array<(embeddings: Map<string, number[]>) => void> = []
+  private reindexCallbacks: Array<() => void | Promise<void>> = []
   private isReindexing = false
+  private providerInit?: Promise<void>
+  private providerTarget = "transformers"
+  private providerSource: "env" | "default" = "default"
+  private initError?: string
 
   async start(): Promise<void> {
     log.info("starting embedding service in background")
@@ -58,8 +183,18 @@ export class EmbeddingBackgroundService implements IBackgroundService {
       mkdirSync(modelCacheDir, { recursive: true })
     }
 
-    this.status = "ready"
-    log.info("embedding service ready (using hash-based fallback)")
+    this.status = "fallback"
+    this.providerInit = this.initializeProvider().catch((error) => {
+      this.status = "fallback"
+      this.initError = String(error)
+      embeddingService.reportProviderFailure(this.initError)
+      embeddingService.useFallback()
+      log.warn("real embedding provider init failed, staying on fallback", { error: String(error) })
+    })
+    log.info("embedding service ready (semantic fallback active, provider booting)", {
+      targetProvider: this.providerTarget,
+      source: this.providerSource,
+    })
   }
 
   async stop(): Promise<void> {
@@ -72,8 +207,38 @@ export class EmbeddingBackgroundService implements IBackgroundService {
     return this.status
   }
 
+  /**
+   * Wait until the real embedding provider is ready (status === "ready").
+   * Resolves true if ready within timeout, false if timed-out on fallback.
+   */
+  async waitForProvider(timeoutMs = 3000): Promise<boolean> {
+    if (this.status === "ready") return true
+    return new Promise<boolean>((resolve) => {
+      const deadline = Date.now() + timeoutMs
+      const check = setInterval(() => {
+        if (this.status === "ready" || Date.now() >= deadline) {
+          clearInterval(check)
+          resolve(this.status === "ready")
+        }
+      }, 100)
+    })
+  }
+
   isReady(): boolean {
     return this.status === "ready" || this.status === "fallback"
+  }
+
+  getRuntimeContext(): EmbeddingRuntimeContext {
+    const runtime = embeddingService.getRuntimeState()
+    return {
+      serviceStatus: this.status,
+      targetProvider: this.providerTarget,
+      source: this.providerSource,
+      activeProvider: runtime.activeProvider,
+      activeProviderKind: runtime.activeProviderKind,
+      mode: runtime.mode,
+      lastError: this.initError ?? runtime.lastError,
+    }
   }
 
   async embed(text: string): Promise<number[]> {
@@ -87,13 +252,13 @@ export class EmbeddingBackgroundService implements IBackgroundService {
       this.fallbackCache.set(text, embedding)
       return embedding
     } catch (error) {
-      log.warn("embedding failed, using hash fallback", { error: String(error) })
+      log.warn("embedding failed, using semantic fallback", { error: String(error) })
       return this.generateHashEmbedding(text)
     }
   }
 
   private generateHashEmbedding(text: string): number[] {
-    const dimensions = 384
+    const dimensions = EMBEDDING_OUTPUT_DIMENSIONS
     const embedding: number[] = new Array(dimensions).fill(0)
 
     let hash = 0
@@ -125,12 +290,50 @@ export class EmbeddingBackgroundService implements IBackgroundService {
     return embedding
   }
 
-  onReindex(callback: (embeddings: Map<string, number[]>) => void): void {
+  onReindex(callback: () => void | Promise<void>): void {
     this.reindexCallbacks.push(callback)
 
     if (this.status === "ready") {
       this.triggerReindex()
     }
+  }
+
+  private async initializeProvider() {
+    const setup = resolveEmbeddingBootstrapConfig()
+    this.providerTarget = setup.targetProvider
+    this.providerSource = setup.source
+
+    if (setup.mode === "fallback") {
+      embeddingService.useFallback()
+      this.status = "fallback"
+      this.initError = undefined
+      log.info("embedding provider configured to fallback mode", {
+        source: this.providerSource,
+      })
+      return
+    }
+
+    if (setup.mode === "external") {
+      await embeddingService.configureFromSettings(setup.config)
+      this.status = "ready"
+      this.initError = undefined
+      log.info("embedding provider activated", {
+        source: this.providerSource,
+        provider: embeddingService.getProvider().name,
+      })
+      await this.triggerReindex()
+      return
+    }
+
+    const provider = new TransformersEmbeddingProvider()
+    await embeddingService.configureProvider(provider)
+    this.status = "ready"
+    this.initError = undefined
+    log.info("embedding provider activated", {
+      source: this.providerSource,
+      provider: embeddingService.getProvider().name,
+    })
+    await this.triggerReindex()
   }
 
   private async triggerReindex(): Promise<void> {
@@ -140,31 +343,18 @@ export class EmbeddingBackgroundService implements IBackgroundService {
     this.isReindexing = true
 
     try {
-      const texts: string[] = []
-      for (const key of this.fallbackCache.keys()) {
-        texts.push(key)
-      }
-
-      if (texts.length === 0) {
-        this.isReindexing = false
-        return
-      }
-
-      log.info("reindexing embeddings", { count: texts.length })
-
-      const embeddings = new Map<string, number[]>()
-      for (const text of texts) {
-        const embedding = await embeddingService.getEmbedding(text)
-        embeddings.set(text, embedding)
-      }
-
+      log.info("reindexing embeddings after provider upgrade", { cached: this.fallbackCache.size })
       for (const callback of this.reindexCallbacks) {
-        callback(embeddings)
+        await callback()
       }
+
+      await rebuildRegisteredProjects().catch((error) => {
+        log.warn("registered project rebuild failed after embedding upgrade", { error: String(error) })
+      })
 
       this.fallbackCache.clear()
 
-      log.info("reindexing complete", { count: texts.length })
+      log.info("reindexing complete after provider upgrade")
     } catch (error) {
       log.error("reindexing failed", { error: String(error) })
     } finally {

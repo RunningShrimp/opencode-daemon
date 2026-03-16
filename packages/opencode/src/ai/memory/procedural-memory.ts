@@ -68,6 +68,13 @@ export interface ProceduralMemoryConfig {
   decayFactor: number
 }
 
+export interface ProceduralMemorySnapshot {
+  version: 1
+  memoryUnits: MemoryUnit[]
+  trajectories: TaskTrajectory[]
+  workflowPatterns: WorkflowPattern[]
+}
+
 const DEFAULT_CONFIG: ProceduralMemoryConfig = {
   maxUnits: 1000,
   minSuccessRate: 0.3,
@@ -151,6 +158,13 @@ export class ProceduralMemory {
     if (success && this.currentTrajectory.steps.length >= this.config.patternThreshold) {
       this.extractWorkflowPattern(this.currentTrajectory)
     }
+
+    // Cap trajectory history to avoid unbounded growth
+    if (this.trajectories.length > 200) {
+      this.trajectories = this.trajectories.slice(-200)
+    }
+
+    this.pruneToLimit()
 
     const finished = this.currentTrajectory
     this.currentTrajectory = null
@@ -331,12 +345,53 @@ export class ProceduralMemory {
     }
   }
 
+  private pruneToLimit(): void {
+    if (this.memoryUnits.size <= this.config.maxUnits) return
+    const now = Date.now()
+    const thirtyDays = 30 * 86_400_000
+    const units = [...this.memoryUnits.values()]
+    units.sort((a, b) => {
+      const scoreA = a.successRate * 0.6 + (1 - Math.min((now - a.lastUsed) / thirtyDays, 1)) * 0.4
+      const scoreB = b.successRate * 0.6 + (1 - Math.min((now - b.lastUsed) / thirtyDays, 1)) * 0.4
+      return scoreA - scoreB // ascending: weakest first
+    })
+    const excess = units.length - this.config.maxUnits
+    for (let i = 0; i < excess; i++) {
+      this.memoryUnits.delete(units[i].id)
+    }
+    log.debug("procedural memory pruned", { removed: excess, remaining: this.memoryUnits.size })
+  }
+
   clear(): void {
     this.memoryUnits.clear()
     this.trajectories = []
     this.workflowPatterns.clear()
     this.currentTrajectory = null
     log.info("procedural memory cleared")
+  }
+
+  snapshot(): ProceduralMemorySnapshot {
+    return {
+      version: 1,
+      memoryUnits: Array.from(this.memoryUnits.values()).map((unit) => structuredClone(unit)),
+      trajectories: structuredClone(this.trajectories),
+      workflowPatterns: Array.from(this.workflowPatterns.values()).map((pattern) => structuredClone(pattern)),
+    }
+  }
+
+  restore(snapshot: ProceduralMemorySnapshot): void {
+    this.memoryUnits.clear()
+    this.trajectories = structuredClone(snapshot.trajectories ?? [])
+    this.workflowPatterns.clear()
+    this.currentTrajectory = null
+
+    for (const unit of snapshot.memoryUnits ?? []) {
+      this.memoryUnits.set(unit.id, unit)
+    }
+
+    for (const pattern of snapshot.workflowPatterns ?? []) {
+      this.workflowPatterns.set(pattern.id, pattern)
+    }
   }
 }
 

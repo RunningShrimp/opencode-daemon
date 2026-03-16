@@ -39,7 +39,7 @@ export class Chunker {
           id: this.generateId(),
           content,
           path,
-          startLine: 0,
+          startLine: 1,
           endLine: lines.length,
           type: this.detectType(content),
           metadata: {},
@@ -48,15 +48,15 @@ export class Chunker {
     }
 
     let currentChunk: string[] = []
-    let startLine = 0
+    let startLine = 1
 
     for (let i = 0; i < lines.length; i++) {
       currentChunk.push(lines[i])
 
       if (currentChunk.length >= this.config.maxChunkSize) {
-        chunks.push(this.createChunk(currentChunk, path, startLine, i))
-        startLine = i - this.config.overlap + 1
-        currentChunk = lines.slice(Math.max(0, i - this.config.overlap))
+        chunks.push(this.createChunk(currentChunk, path, startLine, i + 1))
+        startLine = Math.max(1, i - this.config.overlap + 2)
+        currentChunk = lines.slice(Math.max(0, i - this.config.overlap + 1), i + 1)
       }
     }
 

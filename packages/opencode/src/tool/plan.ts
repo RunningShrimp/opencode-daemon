@@ -4,12 +4,12 @@ import { Tool } from "./tool"
 import { Question } from "../question"
 import { Session } from "../session"
 import { MessageV2 } from "../session/message-v2"
-import { Identifier } from "../id/id"
 import { Provider } from "../provider/provider"
 import { Instance } from "../project/instance"
+import { type SessionID, MessageID, PartID } from "../session/schema"
 import EXIT_DESCRIPTION from "./plan-exit.txt"
 
-async function getLastModel(sessionID: string) {
+async function getLastModel(sessionID: SessionID) {
   for await (const item of MessageV2.stream(sessionID)) {
     if (item.info.role === "user" && item.info.model) return item.info.model
   }
@@ -18,33 +18,55 @@ async function getLastModel(sessionID: string) {
 
 export const PlanExitTool = Tool.define("plan_exit", {
   description: EXIT_DESCRIPTION,
-  parameters: z.object({}),
-  async execute(_params, ctx) {
+  parameters: z.object({
+    autoApprove: z.boolean().optional().default(false),
+    summary: z.string().optional(),
+    satisfiedCriteria: z.array(z.string()).optional().default([]),
+    remainingQuestions: z.array(z.string()).optional().default([]),
+  }),
+  async execute(params, ctx) {
     const session = await Session.get(ctx.sessionID)
     const plan = path.relative(Instance.worktree, Session.plan(session))
-    const answers = await Question.ask({
-      sessionID: ctx.sessionID,
-      questions: [
-        {
-          question: `Plan at ${plan} is complete. Would you like to switch to the build agent and start implementing?`,
-          header: "Build Agent",
-          custom: false,
-          options: [
-            { label: "Yes", description: "Switch to build agent and start implementing the plan" },
-            { label: "No", description: "Stay with plan agent to continue refining the plan" },
-          ],
-        },
-      ],
-      tool: ctx.callID ? { messageID: ctx.messageID, callID: ctx.callID } : undefined,
-    })
+    const satisfiedCriteria = params.satisfiedCriteria ?? []
+    const remainingQuestions = params.remainingQuestions ?? []
+    const autoApprove = params.autoApprove === true
 
-    const answer = answers[0]?.[0]
-    if (answer === "No") throw new Question.RejectedError()
+    if (autoApprove) {
+      if (remainingQuestions.length > 0 || (satisfiedCriteria.length === 0 && !params.summary?.trim())) {
+        throw new Error(
+          "The plan_exit tool can only auto-approve when there are no remaining questions and you provide either a summary or at least one satisfied success criterion.",
+        )
+      }
+    } else {
+      const answers = await Question.ask({
+        sessionID: ctx.sessionID,
+        questions: [
+          {
+            question: `Plan at ${plan} is complete. Would you like to switch to the build agent and start implementing?`,
+            header: "Build Agent",
+            custom: false,
+            options: [
+              { label: "Yes", description: "Switch to build agent and start implementing the plan" },
+              { label: "No", description: "Stay with plan agent to continue refining the plan" },
+            ],
+          },
+        ],
+        tool: ctx.callID ? { messageID: ctx.messageID, callID: ctx.callID } : undefined,
+      })
+
+      const answer = answers[0]?.[0]
+      if (answer === "No") throw new Question.RejectedError()
+    }
 
     const model = await getLastModel(ctx.sessionID)
+    const evidenceSummary = [params.summary?.trim(), ...satisfiedCriteria].filter(Boolean).join("\n- ")
+    const approvalLine = autoApprove
+      ? `The plan at ${plan} is approved for autonomous execution.`
+      : `The plan at ${plan} has been approved, you can now edit files.`
+    const detailBlock = evidenceSummary ? `\nPlan handoff evidence:\n- ${evidenceSummary}` : ""
 
     const userMsg: MessageV2.User = {
-      id: Identifier.ascending("message"),
+      id: MessageID.ascending(),
       sessionID: ctx.sessionID,
       role: "user",
       time: {
@@ -55,18 +77,22 @@ export const PlanExitTool = Tool.define("plan_exit", {
     }
     await Session.updateMessage(userMsg)
     await Session.updatePart({
-      id: Identifier.ascending("part"),
+      id: PartID.ascending(),
       messageID: userMsg.id,
       sessionID: ctx.sessionID,
       type: "text",
-      text: `The plan at ${plan} has been approved, you can now edit files. Execute the plan`,
+      text: `${approvalLine}${detailBlock}\nExecute the plan`,
       synthetic: true,
     } satisfies MessageV2.TextPart)
 
     return {
       title: "Switching to build agent",
-      output: "User approved switching to build agent. Wait for further instructions.",
-      metadata: {},
+      output: autoApprove
+        ? "Autonomous approval recorded. Switched to the build agent with the supplied handoff evidence."
+        : "User approved switching to build agent. Wait for further instructions.",
+      metadata: {
+        approvalMode: autoApprove ? "autonomous" : "interactive",
+      },
     }
   },
 })
@@ -102,7 +128,7 @@ export const PlanEnterTool = Tool.define("plan_enter", {
     const model = await getLastModel(ctx.sessionID)
 
     const userMsg: MessageV2.User = {
-      id: Identifier.ascending("message"),
+      id: MessageID.ascending(),
       sessionID: ctx.sessionID,
       role: "user",
       time: {
@@ -113,7 +139,7 @@ export const PlanEnterTool = Tool.define("plan_enter", {
     }
     await Session.updateMessage(userMsg)
     await Session.updatePart({
-      id: Identifier.ascending("part"),
+      id: PartID.ascending(),
       messageID: userMsg.id,
       sessionID: ctx.sessionID,
       type: "text",

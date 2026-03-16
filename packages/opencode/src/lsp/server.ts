@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "child_process"
+import { spawn as launch, type ChildProcessWithoutNullStreams } from "child_process"
 import path from "path"
 import os from "os"
 import { Global } from "../global"
@@ -13,6 +13,11 @@ import { Archive } from "../util/archive"
 import { Process } from "../util/process"
 import { which } from "../util/which"
 import { Module } from "@opencode-ai/util/module"
+
+const spawn = ((cmd, args, opts) => {
+  if (Array.isArray(args)) return launch(cmd, [...args], { ...(opts ?? {}), windowsHide: true })
+  return launch(cmd, { ...(args ?? {}), windowsHide: true })
+}) as typeof launch
 
 export namespace LSPServer {
   const log = Log.create({ service: "lsp.server" })
@@ -336,7 +341,7 @@ export namespace LSPServer {
       if (await Filesystem.exists(localBin)) bin = localBin
       if (!bin) {
         const found = which("biome")
-        if (found) bin = found
+        if (found && (await Filesystem.exists(found))) bin = found
       }
 
       let args = ["lsp-proxy", "--stdio"]
@@ -348,13 +353,35 @@ export namespace LSPServer {
         args = ["x", "biome", "lsp-proxy", "--stdio"]
       }
 
-      const proc = spawn(bin, args, {
-        cwd: root,
-        env: {
-          ...process.env,
-          BUN_BE_BUN: "1",
-        },
+      let proc
+      try {
+        proc = spawn(bin, args, {
+          cwd: root,
+          env: {
+            ...process.env,
+            BUN_BE_BUN: "1",
+          },
+        })
+      } catch (error) {
+        log.warn("failed to spawn biome lsp", {
+          root,
+          bin,
+          error: String(error),
+        })
+        return
+      }
+
+      proc.once("error", (error) => {
+        log.warn("biome lsp process emitted error", {
+          root,
+          bin,
+          error: String(error),
+        })
       })
+
+      if (proc.pid == null) {
+        return
+      }
 
       return {
         process: proc,

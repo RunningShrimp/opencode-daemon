@@ -1,6 +1,12 @@
 import z from "zod"
 import { Tool } from "@/tool/tool"
 import { Evidence, EvidenceSource, createEvidence } from "@/ai/thinking/evidence"
+import { EvidenceLedger } from "@/ai/evidence/ledger"
+import { Instance } from "@/project/instance"
+import { embeddingService } from "@/ai/rag/embedding"
+import { ensureProjectIndexed } from "@/ai/rag/indexer"
+import { vectorStore } from "@/ai/rag/vector-store"
+import { WorkflowOrchestrator } from "@/ai/workflow/orchestrator"
 
 const SourceTypeSchema = z.enum(["code", "documentation", "test", "config", "llm_reasoning", "previous_session"])
 
@@ -32,6 +38,8 @@ interface EvidenceGatherResult {
   recommendation: string
 }
 
+const PROJECT_RESULT_LIMIT = 8
+
 function mapSourceTypeToEvidenceSource(sourceType: string): EvidenceSource[] {
   const mapping: Record<string, EvidenceSource[]> = {
     code: [EvidenceSource.CODEBASE],
@@ -42,6 +50,166 @@ function mapSourceTypeToEvidenceSource(sourceType: string): EvidenceSource[] {
     previous_session: [EvidenceSource.PREVIOUS_SESSION],
   }
   return mapping[sourceType] || [EvidenceSource.MODEL_GENERATED]
+}
+
+function shouldSearchProject(sourceTypes?: string[]) {
+  if (!sourceTypes || sourceTypes.length === 0) return true
+  return sourceTypes.some((sourceType) => ["code", "documentation", "test", "config"].includes(sourceType))
+}
+
+function shouldIncludePreviousSession(sourceTypes?: string[]) {
+  if (!sourceTypes || sourceTypes.length === 0) return true
+  return sourceTypes.includes("previous_session")
+}
+
+function classifyProjectSource(filePath: string): "code" | "documentation" | "test" | "config" {
+  const normalized = filePath.toLowerCase()
+  if (
+    normalized.endsWith("package.json") ||
+    normalized.endsWith("tsconfig.json") ||
+    normalized.endsWith("bunfig.toml") ||
+    normalized.includes("/config") ||
+    /(^|\/)[^.]+\.config\./.test(normalized)
+  ) {
+    return "config"
+  }
+  if (
+    normalized.includes("/__tests__/") ||
+    normalized.includes("/test/") ||
+    normalized.includes("/tests/") ||
+    normalized.includes(".test.") ||
+    normalized.includes(".spec.")
+  ) {
+    return "test"
+  }
+  if (normalized.endsWith(".md") || normalized.endsWith(".mdx") || normalized.includes("/docs/")) {
+    return "documentation"
+  }
+  return "code"
+}
+
+function formatLocation(filePath: string, startLine?: number, endLine?: number) {
+  if (typeof startLine !== "number") return filePath
+  if (typeof endLine === "number" && endLine !== startLine) {
+    return `${filePath}:${startLine}-${endLine}`
+  }
+  return `${filePath}:${startLine}`
+}
+
+function overlapScore(hypothesis: string, content: string) {
+  const hypothesisTokens = tokenize(hypothesis)
+  const contentTokens = new Set(tokenize(content))
+  if (hypothesisTokens.length === 0) return 0
+  const matches = hypothesisTokens.filter((token) => contentTokens.has(token)).length
+  return matches / hypothesisTokens.length
+}
+
+function tokenize(value: string) {
+  return [...new Set(value.toLowerCase().split(/[^a-z0-9_./-]+/g).filter((token) => token.length > 2))]
+}
+
+function dedupeEvidence(items: Evidence[]) {
+  const seen = new Set<string>()
+  const result: Evidence[] = []
+  for (const item of items.sort((left, right) => right.relevance - left.relevance)) {
+    const key = `${item.source}:${item.location ?? ""}:${item.content.slice(0, 120)}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(item)
+  }
+  return result
+}
+
+async function gatherProjectEvidence(
+  hypothesis: string,
+  searchQuery: string | undefined,
+  sourceTypes: string[] | undefined,
+  minRelevance: number,
+) {
+  const project = Instance.project
+  if (!project || !shouldSearchProject(sourceTypes)) return []
+
+  if ((await vectorStore.getProjectSize(project.id)) === 0) {
+    await ensureProjectIndexed({
+      rootDir: project.worktree,
+      fallbackDir: Instance.directory,
+      projectId: project.id,
+      vectorStore,
+    }).catch(() => undefined)
+  }
+
+  const query = searchQuery?.trim() || hypothesis
+  const queryEmbeddings = await embeddingService.getQueryEmbeddings(query)
+  const results = await vectorStore.search(queryEmbeddings, {
+    projectId: project.id,
+    limit: PROJECT_RESULT_LIMIT,
+    minScore: Math.max(0.15, minRelevance * 0.5),
+  })
+
+  return results
+    .filter((result) => {
+      const category = classifyProjectSource(result.path)
+      return !sourceTypes || sourceTypes.length === 0 || sourceTypes.includes(category)
+    })
+    .map((result) => {
+      const location = formatLocation(result.path, result.startLine, result.endLine)
+      const relevance = Math.max(result.score, overlapScore(hypothesis, `${result.path}\n${result.content}`))
+      return createEvidence(
+        EvidenceSource.CODEBASE,
+        result.content,
+        Math.min(1, relevance),
+        {
+          filePath: result.path,
+          category: classifyProjectSource(result.path),
+        },
+        {
+          quote: result.content.slice(0, 200),
+          location,
+        },
+      )
+    })
+}
+
+async function gatherPreviousSessionEvidence(hypothesis: string, sessionID: string, projectID: string, minRelevance: number) {
+  const snapshot = await EvidenceLedger.read(sessionID, projectID)
+  return snapshot.claims
+    .flatMap((claim) => {
+      const location = `session:${snapshot.sessionID}:claim:${claim.id}`
+      const support = claim.evidence.map((item) =>
+        createEvidence(
+          EvidenceSource.PREVIOUS_SESSION,
+          `${claim.claim}\n${item.quote ?? item.content}`,
+          Math.max(item.relevance, overlapScore(hypothesis, `${claim.claim}\n${item.content}`)),
+          {
+            claim: claim.claim,
+            originalSource: claim.source,
+          },
+          {
+            quote: item.quote,
+            location,
+            contradicts: item.contradicts,
+          },
+        ),
+      )
+      const counter = claim.counterEvidence.map((item) =>
+        createEvidence(
+          EvidenceSource.PREVIOUS_SESSION,
+          `${claim.claim}\n${item.quote ?? item.content}`,
+          Math.max(item.relevance, overlapScore(hypothesis, `${claim.claim}\n${item.content}`)),
+          {
+            claim: claim.claim,
+            originalSource: claim.source,
+          },
+          {
+            quote: item.quote,
+            location,
+            contradicts: true,
+          },
+        ),
+      )
+      return [...support, ...counter]
+    })
+    .filter((item) => item.relevance >= minRelevance)
 }
 
 function scoreRelevance(evidence: Evidence, hypothesis: string): number {
@@ -154,59 +322,24 @@ function generateRecommendation(
   return `Insufficient evidence to validate the hypothesis. Only ${totalEvidence} evidence items found with average relevance of ${(averageRelevance * 100).toFixed(0)}%. Consider providing a search query or additional context.`
 }
 
-function createMockEvidence(hypothesis: string, minRelevance: number): Evidence[] {
-  const mockEvidenceData = [
-    {
-      source: EvidenceSource.CODEBASE,
-      content: `The code confirms that the implementation follows the expected pattern for ${hypothesis}`,
-      contradicts: false,
-    },
-    {
-      source: EvidenceSource.CODEBASE,
-      content: `Analysis shows the function correctly handles edge cases related to ${hypothesis}`,
-      contradicts: false,
-    },
-    {
-      source: EvidenceSource.WEB,
-      content: `Documentation validates that ${hypothesis} is the recommended approach`,
-      contradicts: false,
-    },
-    {
-      source: EvidenceSource.TOOL_RESULT,
-      content: `Test results demonstrate the implementation works correctly for ${hypothesis}`,
-      contradicts: false,
-    },
-    {
-      source: EvidenceSource.CODEBASE,
-      content: `The code contains a bug that prevents ${hypothesis} from working correctly`,
-      contradicts: true,
-    },
-    {
-      source: EvidenceSource.MODEL_GENERATED,
-      content: `Analysis suggests ${hypothesis} may have some issues`,
-      contradicts: false,
-    },
-  ]
-
-  return mockEvidenceData
-    .map((data) => {
-      const relevance = 0.4 + Math.random() * 0.6
-      const evidence = createEvidence(data.source, data.content, relevance, undefined, {
-        contradicts: data.contradicts,
-      })
-      return evidence
-    })
-    .filter((e) => e.relevance >= minRelevance)
-}
-
 export const EvidenceGatherTool = Tool.define("evidence_gather", async () => ({
   description:
     "Gather and validate evidence for a hypothesis. This tool helps agents collect relevant information and assess its validity by scoring relevance and detecting contradictions.",
   parameters: EvidenceGatherParameters,
-  async execute(params: EvidenceGatherParams) {
+  async execute(params: EvidenceGatherParams, ctx) {
     const minRelevance = params.minRelevance ?? 0.3
 
-    let evidence = createMockEvidence(params.hypothesis, minRelevance)
+    const projectEvidence = await gatherProjectEvidence(
+      params.hypothesis,
+      params.searchQuery,
+      params.sourceTypes,
+      minRelevance,
+    ).catch(() => [])
+    const previousSessionEvidence = shouldIncludePreviousSession(params.sourceTypes) && Instance.project
+      ? await gatherPreviousSessionEvidence(params.hypothesis, ctx.sessionID, Instance.project.id, minRelevance).catch(() => [])
+      : []
+
+    let evidence = dedupeEvidence([...projectEvidence, ...previousSessionEvidence])
 
     if (params.sourceTypes && params.sourceTypes.length > 0) {
       const allowedSources = params.sourceTypes.flatMap(mapSourceTypeToEvidenceSource)
@@ -259,7 +392,7 @@ export const EvidenceGatherTool = Tool.define("evidence_gather", async () => ({
     const evidenceSummary = result.evidence
       .map(
         (e, i) =>
-          `${i + 1}. [${e.source}] ${e.contradicts ? "(CONTRADICTS) " : ""}Relevance: ${(e.relevance * 100).toFixed(0)}% - ${e.content.substring(0, 100)}...`,
+          `${i + 1}. [${e.source}] ${e.contradicts ? "(CONTRADICTS) " : ""}Relevance: ${(e.relevance * 100).toFixed(0)}%${e.location ? ` @ ${e.location}` : ""} - ${e.content.substring(0, 100)}...`,
       )
       .join("\n")
 
@@ -278,6 +411,25 @@ ${evidenceSummary || "No evidence found matching the criteria."}
 
 ## Recommendation
 ${result.recommendation}`
+
+    void EvidenceLedger.recordEvidenceCollection({
+      sessionID: ctx.sessionID,
+      projectID: Instance.project.id,
+      hypothesis: params.hypothesis,
+      evidence: filteredEvidence,
+      confidence:
+        confidenceLevel === "high" ? 0.85 : confidenceLevel === "medium" ? 0.6 : totalEvidence > 0 ? 0.35 : 0,
+      source: "tool",
+      metadata: {
+        tool: "evidence_gather",
+        searchQuery: params.searchQuery,
+        sourceTypes: params.sourceTypes,
+      },
+    }).catch(() => undefined)
+    void WorkflowOrchestrator.noteEvidence(
+      ctx.sessionID,
+      filteredEvidence.map((item) => item.location ?? item.quote ?? item.content.slice(0, 120)),
+    ).catch(() => undefined)
 
     return {
       title: `Evidence: ${confidenceLevel} confidence`,

@@ -1,10 +1,7 @@
-import { Mutex } from "./mutex"
-
 export class AsyncQueue<T> implements AsyncIterable<T> {
   private queue: T[] = []
   private resolvers: ((value: T) => void)[] = []
   private rejectors: ((error: Error) => void)[] = []
-  private readonly mutex = new Mutex()
 
   get length(): number {
     return this.queue.length
@@ -29,15 +26,13 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
   }
 
   async next(): Promise<T> {
-    return this.mutex.run(() => {
-      if (this.queue.length > 0) {
-        return Promise.resolve(this.queue.shift()!)
-      }
+    if (this.queue.length > 0) {
+      return Promise.resolve(this.queue.shift()!)
+    }
 
-      return new Promise<T>((resolve, reject) => {
-        this.resolvers.push(resolve)
-        this.rejectors.push(reject)
-      })
+    return new Promise<T>((resolve, reject) => {
+      this.resolvers.push(resolve)
+      this.rejectors.push(reject)
     })
   }
 

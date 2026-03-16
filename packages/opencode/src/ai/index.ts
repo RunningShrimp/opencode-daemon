@@ -33,6 +33,10 @@ export {
 export { SelfCritiqueTool } from "./tools/self-critique"
 export { ReviewVerifyTool } from "./tools/review-verify"
 export { EvidenceGatherTool } from "./tools/evidence-gather"
+export { WorkflowOrchestrator } from "./workflow/orchestrator"
+export { ProjectMemory } from "./memory/project-memory"
+export { LearningStore } from "./memory/learning-store"
+export { Personality } from "./personality"
 export { PlanExitTool } from "@/tool/plan"
 export {
   CompactionPredictor,

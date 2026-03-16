@@ -8,6 +8,7 @@ export enum AgentState {
   PLANNING = "planning",
   EXECUTING = "executing",
   WAITING = "waiting",
+  WAITING_FOR_INPUT = "waiting_for_input",
   REFLECTING = "reflecting",
   LEARNING = "learning",
   ADAPTING = "adapting",

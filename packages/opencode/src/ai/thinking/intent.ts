@@ -1,22 +1,20 @@
 export type TaskIntent =
   | { type: "review"; target: string; scope: "code" | "security" | "performance" | "general" }
   | { type: "implementation"; description: string; complexity: "simple" | "moderate" | "complex" }
-  | { type: "exploration"; query: string }
+  | { type: "exploration"; query: string; mode: "lookup" | "question" }
   | { type: "debugging"; error: string }
   | { type: "unknown" }
 
 const REVIEW_KEYWORDS = [
   "review",
   "audit",
-  "check",
-  "security",
-  "vulnerability",
-  "safe",
-  "secure",
-  "verify",
-  "validate",
-  "test",
+  "code review",
+  "security review",
+  "performance review",
 ] as const
+
+const REVIEW_HINTS = ["inspect", "assess", "check"] as const
+const SECURITY_HINTS = ["security", "vulnerability", "secure", "safe"] as const
 
 const COMPLEXITY_INDICATORS = {
   simple: ["fix", "add", "remove", "update simple"],
@@ -25,6 +23,56 @@ const COMPLEXITY_INDICATORS = {
 } as const
 
 const DEBUGGING_KEYWORDS = ["error", "bug", "fix", "crash", "exception", "failed"] as const
+
+const QUESTION_PREFIXES = [
+  "what",
+  "why",
+  "how",
+  "which",
+  "where",
+  "when",
+  "who",
+  "can",
+  "could",
+  "would",
+  "should",
+  "is",
+  "are",
+  "do",
+  "does",
+  "did",
+  "will",
+  "tell me",
+  "explain",
+  "summarize",
+  "compare",
+  "calculate",
+  "compute",
+  "solve",
+] as const
+
+const CHANGE_ACTION_HINTS = [
+  "add",
+  "build",
+  "change",
+  "create",
+  "edit",
+  "implement",
+  "improve",
+  "make",
+  "modify",
+  "optimize",
+  "patch",
+  "refactor",
+  "redesign",
+  "remove",
+  "rewrite",
+  "update",
+  "upgrade",
+] as const
+
+const FILE_OR_CODE_SCOPE_HINT = /[./][a-z0-9_-]+|src\/|packages\/|README|docs\//i
+const SIMPLE_MATH_PATTERN = /(^|\b)(\d+(?:\.\d+)?)\s*([+\-*/x×])\s*(\d+(?:\.\d+)?)(\b|$)/i
 
 function extractTarget(prompt: string): string {
   const lower = prompt.toLowerCase()
@@ -139,6 +187,23 @@ function detectReviewIntent(prompt: string): TaskIntent | null {
       }
     }
   }
+
+  if (SECURITY_HINTS.some((keyword) => lower.includes(keyword)) && REVIEW_HINTS.some((keyword) => lower.includes(keyword))) {
+    return {
+      type: "review",
+      target: extractTarget(prompt),
+      scope: "security",
+    }
+  }
+
+  if (lower.includes("performance") && REVIEW_HINTS.some((keyword) => lower.includes(keyword))) {
+    return {
+      type: "review",
+      target: extractTarget(prompt),
+      scope: "performance",
+    }
+  }
+
   return null
 }
 
@@ -169,10 +234,31 @@ function detectExplorationIntent(prompt: string): TaskIntent | null {
       return {
         type: "exploration",
         query: query || prompt,
+        mode: "lookup",
       }
     }
   }
   return null
+}
+
+function detectQuestionIntent(prompt: string): TaskIntent | null {
+  const trimmed = prompt.trim()
+  if (!trimmed) return null
+
+  const lower = trimmed.toLowerCase()
+  const startsLikeQuestion = QUESTION_PREFIXES.some((prefix) => lower.startsWith(prefix + " "))
+  const endsLikeQuestion = trimmed.endsWith("?") || /[？]$/.test(trimmed)
+  const looksLikeSimpleMath = SIMPLE_MATH_PATTERN.test(trimmed)
+  if (!startsLikeQuestion && !endsLikeQuestion && !looksLikeSimpleMath) return null
+
+  if (CHANGE_ACTION_HINTS.some((hint) => lower.includes(hint))) return null
+  if (FILE_OR_CODE_SCOPE_HINT.test(trimmed) && !endsLikeQuestion) return null
+
+  return {
+    type: "exploration",
+    query: trimmed,
+    mode: "question",
+  }
 }
 
 function detectImplementationIntent(prompt: string): TaskIntent {
@@ -189,14 +275,17 @@ function detectImplementationIntent(prompt: string): TaskIntent {
 }
 
 function detect(prompt: string): TaskIntent {
-  const review = detectReviewIntent(prompt)
-  if (review) return review
-
   const debug = detectDebuggingIntent(prompt)
   if (debug) return debug
 
+  const review = detectReviewIntent(prompt)
+  if (review) return review
+
   const exploration = detectExplorationIntent(prompt)
   if (exploration) return exploration
+
+  const question = detectQuestionIntent(prompt)
+  if (question) return question
 
   return detectImplementationIntent(prompt)
 }

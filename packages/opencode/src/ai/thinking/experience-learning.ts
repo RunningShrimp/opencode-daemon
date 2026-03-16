@@ -49,6 +49,12 @@ export interface ContextualLearning {
   complexity?: "simple" | "moderate" | "complex"
 }
 
+export interface ExperienceLearningSnapshot {
+  version: 1
+  experiences: Experience[]
+  patterns: LearnedPattern[]
+}
+
 const MAX_EXPERIENCES = 1000
 const PATTERN_THRESHOLD = 3
 const SUCCESS_RATE_THRESHOLD = 0.7
@@ -69,6 +75,27 @@ export class ExperienceLearning {
     lessons?: string[]
     applicableTo?: string[]
   }): Experience {
+    const signature = this.experienceSignature({
+      situation: params.situation,
+      action: params.action,
+      context: params.context,
+      success: params.success,
+    })
+    const existing = this.experiences.find((experience) => this.experienceSignature(experience) === signature)
+    if (existing) {
+      existing.timestamp = Date.now()
+      existing.outcome = summarizeOutcome(existing.outcome, params.outcome)
+      existing.tags = [...new Set([...existing.tags, ...(params.tags ?? [])])]
+      existing.lessons = [...new Set([...existing.lessons, ...(params.lessons ?? [])])]
+      existing.applicableTo = [...new Set([...existing.applicableTo, ...(params.applicableTo ?? [])])]
+      existing.timesApplied = Math.max(1, existing.timesApplied) + 1
+      existing.timesSucceeded = (existing.timesSucceeded ?? (existing.success ? 1 : 0)) + (params.success ? 1 : 0)
+      existing.effectiveness = existing.timesSucceeded / Math.max(1, existing.timesApplied)
+      this.rebuildIndexes()
+      this.detectAndCreatePattern(existing)
+      return existing
+    }
+
     const experience: Experience = {
       id: `exp-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       category: params.success ? ExperienceCategory.SUCCESS : ExperienceCategory.FAILURE,
@@ -82,8 +109,8 @@ export class ExperienceLearning {
       lessons: params.lessons ?? [],
       applicableTo: params.applicableTo ?? [],
       effectiveness: params.success ? 1 : 0,
-      timesApplied: 0,
-      timesSucceeded: 0,
+      timesApplied: 1,
+      timesSucceeded: params.success ? 1 : 0,
     }
 
     this.experiences.push(experience)
@@ -99,8 +126,8 @@ export class ExperienceLearning {
   }
 
   private indexExperience(experience: Experience): void {
-    const contextKey = this.getContextKey(experience.context)
-    if (contextKey) {
+    const contextKeys = this.getContextKeys(experience.context)
+    for (const contextKey of contextKeys) {
       const existing = this.contextIndex.get(contextKey) ?? []
       existing.push(experience)
       this.contextIndex.set(contextKey, existing)
@@ -113,53 +140,99 @@ export class ExperienceLearning {
     })
   }
 
-  private getContextKey(context: Record<string, unknown> | ContextualLearning): string {
+  private getContextKeys(context: Record<string, unknown> | ContextualLearning): string[] {
+    const tokens = this.contextTokens(context)
+    if (tokens.length === 0) return []
+    return [...tokens, tokens.join("|")]
+  }
+
+  private contextTokens(context: Record<string, unknown> | ContextualLearning): string[] {
     const parts: string[] = []
-    if ("projectType" in context && context.projectType) parts.push(`pt:${context.projectType}`)
-    if ("language" in context && context.language) parts.push(`lang:${context.language}`)
-    if ("framework" in context && context.framework) parts.push(`fw:${context.framework}`)
-    if ("taskType" in context && context.taskType) parts.push(`task:${context.taskType}`)
-    return parts.join("|")
+    if ("projectType" in context && context.projectType) parts.push(`pt:${String(context.projectType)}`)
+    if ("language" in context && context.language) parts.push(`lang:${String(context.language)}`)
+    if ("framework" in context && context.framework) parts.push(`fw:${String(context.framework)}`)
+    if ("taskType" in context && context.taskType) parts.push(`task:${String(context.taskType)}`)
+    if ("complexity" in context && context.complexity) parts.push(`cx:${String(context.complexity)}`)
+    return parts
   }
 
   private pruneOldExperiences(): void {
-    const sorted = [...this.experiences].sort((a, b) => b.effectiveness - a.effectiveness)
+    const now = Date.now()
+    const sorted = [...this.experiences].sort((a, b) => scoreExperienceRetention(b, now) - scoreExperienceRetention(a, now))
     this.experiences = sorted.slice(0, MAX_EXPERIENCES)
+    this.rebuildIndexes()
+  }
+
+  /**
+   * Remove experiences whose computed success rate falls below `minSuccessRate`
+   * AND that have not been applied within the last `maxAgeDays` days.
+   * Returns the number of entries evicted.
+   */
+  evictByTimeAndRate(minSuccessRate: number, maxAgeDays: number): number {
+    const cutoff = Date.now() - maxAgeDays * 24 * 60 * 60 * 1000
+    const before = this.experiences.length
+    this.experiences = this.experiences.filter((exp) => {
+      const rate = exp.timesApplied > 0 ? exp.timesSucceeded / exp.timesApplied : (exp.success ? 1 : 0)
+      const isStaleByRate = rate < minSuccessRate
+      const isStaleByTime = exp.timestamp < cutoff
+      // Keep unless both conditions are met
+      return !(isStaleByRate && isStaleByTime)
+    })
+    if (this.experiences.length < before) this.rebuildIndexes()
+    return before - this.experiences.length
+  }
+
+  private rebuildIndexes(): void {
+    this.contextIndex.clear()
+    this.tagIndex.clear()
+    for (const experience of this.experiences) {
+      this.indexExperience(experience)
+    }
+  }
+
+  private experienceSignature(input: {
+    situation: string
+    action: string
+    context: Record<string, unknown>
+    success: boolean
+  }) {
+    return [
+      input.success ? "success" : "failure",
+      normalizeExperienceText(input.situation),
+      normalizeExperienceText(input.action),
+      this.contextTokens(input.context).sort().join("|"),
+    ].join("::")
   }
 
   private detectAndCreatePattern(experience: Experience): void {
     const similar = this.findSimilarExperiences(experience, 3)
+    const totalObservations = similar.length + Math.max(1, experience.timesApplied)
+    const successes = similar.filter((e) => e.success).length + experience.timesSucceeded
+    const successRate = successes / Math.max(1, totalObservations)
 
-    if (similar.length >= PATTERN_THRESHOLD) {
-      const successes = similar.filter((e) => e.success).length
-      const successRate = successes / similar.length
+    if (totalObservations >= PATTERN_THRESHOLD && successRate >= SUCCESS_RATE_THRESHOLD) {
+      const existingPattern = this.findExistingPattern(experience.action)
 
-      if (successRate >= SUCCESS_RATE_THRESHOLD) {
-        const existingPattern = this.findExistingPattern(experience.action)
-
-        if (existingPattern) {
-          existingPattern.frequency++
-          existingPattern.timesSucceeded += experience.success ? 1 : 0
-          existingPattern.successRate =
-            (existingPattern.successRate * (existingPattern.frequency - 1) + (experience.success ? 1 : 0)) /
-            existingPattern.frequency
-          existingPattern.lastUsed = Date.now()
-        } else {
-          const pattern: LearnedPattern = {
-            id: `pattern-${Date.now()}`,
-            trigger: experience.situation,
-            action: experience.action,
-            expectedOutcome: experience.outcome,
-            successRate,
-            frequency: similar.length,
-            lastUsed: Date.now(),
-            context: Object.keys(experience.context),
-            conditions: this.extractConditions(experience),
-            timesApplied: 0,
-            timesSucceeded: 0,
-          }
-          this.patterns.set(pattern.id, pattern)
+      if (existingPattern) {
+        existingPattern.frequency = Math.max(existingPattern.frequency, totalObservations)
+        existingPattern.timesSucceeded = Math.max(existingPattern.timesSucceeded, successes)
+        existingPattern.successRate = successRate
+        existingPattern.lastUsed = Date.now()
+      } else {
+        const pattern: LearnedPattern = {
+          id: `pattern-${Date.now()}`,
+          trigger: experience.situation,
+          action: experience.action,
+          expectedOutcome: experience.outcome,
+          successRate,
+          frequency: totalObservations,
+          lastUsed: Date.now(),
+          context: this.contextTokens(experience.context),
+          conditions: this.extractConditions(experience),
+          timesApplied: experience.timesApplied,
+          timesSucceeded: experience.timesSucceeded,
         }
+        this.patterns.set(pattern.id, pattern)
       }
     }
   }
@@ -189,10 +262,7 @@ export class ExperienceLearning {
   }
 
   private extractConditions(experience: Experience): string[] {
-    const conditions: string[] = []
-    if (experience.context.taskType) conditions.push(`taskType:${experience.context.taskType}`)
-    if (experience.context.complexity) conditions.push(`complexity:${experience.context.complexity}`)
-    return conditions
+    return this.contextTokens(experience.context)
   }
 
   applyPattern(patternId: string): Experience | null {
@@ -215,15 +285,21 @@ export class ExperienceLearning {
 
   getRelevantPatterns(context: ContextualLearning): LearnedPattern[] {
     const relevant: { pattern: LearnedPattern; score: number }[] = []
+    const tokens = this.contextTokens(context)
 
     this.patterns.forEach((pattern) => {
       let score = 0
 
-      pattern.context.forEach((ctx) => {
-        if (ctx === `taskType:${context.taskType}`) score += 3
-        if (ctx === `language:${context.language}`) score += 2
-        if (ctx === `framework:${context.framework}`) score += 2
-        if (ctx === `complexity:${context.complexity}`) score += 1
+      pattern.conditions.forEach((condition) => {
+        if (condition === `task:${context.taskType}`) score += 4
+        if (condition === `lang:${context.language}`) score += 3
+        if (condition === `fw:${context.framework}`) score += 3
+        if (condition === `pt:${context.projectType}`) score += 2
+        if (condition === `cx:${context.complexity}`) score += 2
+      })
+
+      tokens.forEach((token) => {
+        if (pattern.context.includes(token)) score += 1.5
       })
 
       score += pattern.successRate * 2
@@ -240,22 +316,40 @@ export class ExperienceLearning {
   }
 
   getApplicableInsights(context: ContextualLearning): Experience[] {
-    const contextKey = this.getContextKey(context)
-    let relevant = this.contextIndex.get(contextKey) ?? []
+    const relevant = new Set<Experience>()
+
+    this.getContextKeys(context).forEach((contextKey) => {
+      for (const item of this.contextIndex.get(contextKey) ?? []) {
+        relevant.add(item)
+      }
+    })
 
     if (context.taskType) {
       const taskRelevant = this.tagIndex.get(context.taskType) ?? []
-      relevant = [...new Set([...relevant, ...taskRelevant])]
+      taskRelevant.forEach((item) => relevant.add(item))
     }
 
-    return relevant
+    return [...relevant]
       .filter((e) => e.effectiveness >= 0.7)
       .sort((a, b) => {
-        const aScore = (a.success ? 1 : 0) * (a.timesApplied > 0 ? 1.5 : 1)
-        const bScore = (b.success ? 1 : 0) * (b.timesApplied > 0 ? 1.5 : 1)
+        const aScore = this.scoreExperienceForContext(a, context)
+        const bScore = this.scoreExperienceForContext(b, context)
         return bScore - aScore
       })
       .slice(0, 5)
+  }
+
+  private scoreExperienceForContext(experience: Experience, context: ContextualLearning): number {
+    const wanted = new Set(this.contextTokens(context))
+    let score = experience.success ? 1 : 0
+    for (const token of this.contextTokens(experience.context)) {
+      if (!wanted.has(token)) continue
+      if (token.startsWith("task:")) score += 4
+      else if (token.startsWith("cx:")) score += 2
+      else score += 3
+    }
+    if (experience.timesApplied > 0) score += 1.5
+    return score
   }
 
   learnFromReflection(
@@ -375,4 +469,48 @@ ${
       }
     })
   }
+
+  snapshot(): ExperienceLearningSnapshot {
+    return {
+      version: 1,
+      experiences: structuredClone(this.experiences),
+      patterns: Array.from(this.patterns.values()).map((pattern) => structuredClone(pattern)),
+    }
+  }
+
+  restore(snapshot: ExperienceLearningSnapshot): void {
+    this.experiences = []
+    this.patterns.clear()
+    this.contextIndex.clear()
+    this.tagIndex.clear()
+
+    for (const experience of snapshot.experiences ?? []) {
+      this.experiences.push(experience)
+      this.indexExperience(experience)
+    }
+
+    for (const pattern of snapshot.patterns ?? []) {
+      this.patterns.set(pattern.id, pattern)
+    }
+  }
+}
+
+function scoreExperienceRetention(experience: Experience, now: number) {
+  const ageDays = Math.max(0, now - experience.timestamp) / (24 * 60 * 60 * 1000)
+  const recency = Math.max(0.15, 1 - ageDays / 30)
+  const usage = Math.min(1.5, (experience.timesApplied + experience.timesSucceeded) / 6)
+  const contextRichness = Math.min(0.5, Object.keys(experience.context).length * 0.08)
+  return experience.effectiveness * 2 + usage + recency + contextRichness + (experience.success ? 0.3 : 0)
+}
+
+function normalizeExperienceText(text: string) {
+  return text.toLowerCase().replace(/\s+/g, " ").trim()
+}
+
+function summarizeOutcome(existing: string, incoming: string) {
+  const next = incoming.replace(/\s+/g, " ").trim()
+  if (!next) return existing
+  if (!existing) return next
+  if (existing === next) return existing
+  return next.length >= existing.length ? next : existing
 }

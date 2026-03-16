@@ -66,12 +66,21 @@ export class SelfDrivenAgent {
       await this.loop.reflect()
     }
 
+    // Capture current execution strategy from the driving loop
+    const actGuidance = await this.loop.act()
+
+    const needsUserInput = this.loop.shouldRequestUserInput()
     const enhancedContext: Record<string, unknown> = {
       ...state.context,
       selfDrivingEnabled: true,
       agentPhase: state.phase,
       hasActiveGoal: !!state.currentGoal,
       goalProgress: this.loop.getProgress(),
+      needsUserInput,
+    }
+
+    if (actGuidance) {
+      enhancedContext.executionStrategy = actGuidance
     }
 
     if (state.pendingDecisions.length > 0) {
@@ -95,7 +104,9 @@ export class SelfDrivenAgent {
       }))
     }
 
-    const promptGuidance: string | undefined = undefined
+    const promptGuidance = needsUserInput
+      ? "Repeated tool failures or low confidence detected. Stop autonomous exploration, summarize the current blocker, and ask the user one focused clarification before more tool calls."
+      : undefined
 
     return { enhancedContext, promptGuidance }
   }
@@ -120,6 +131,11 @@ export class SelfDrivenAgent {
       if (state.pendingDecisions.length > 0) {
         const lastDecision = state.pendingDecisions[state.pendingDecisions.length - 1]
         adaptation = lastDecision.reasoning
+      }
+      if (this.loop.shouldRequestUserInput()) {
+        adaptation = adaptation
+          ? `${adaptation} Ask the user for a focused clarification before continuing.`
+          : "Ask the user for a focused clarification before continuing."
       }
     }
 

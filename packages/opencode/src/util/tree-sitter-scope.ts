@@ -134,6 +134,11 @@ export interface SyntaxNodeHint {
   syntaxHint: string
 }
 
+export interface TreeSitterParseResult {
+  language: SupportedLanguage
+  rootNode: TreeSitterNode
+}
+
 function resolveWasmAsset(asset: string) {
   if (asset.startsWith("file://")) return fileURLToPath(asset)
   if (asset.startsWith("/") || /^[a-z]:/i.test(asset)) return asset
@@ -323,6 +328,25 @@ async function getParser(filePath: string): Promise<{ parser: Parser; language: 
 export function isTreeSitterLanguageSupported(filePath: string): boolean {
   const ext = path.extname(filePath).slice(1)
   return Boolean(inferLanguageFromExtension(ext))
+}
+
+export async function parseTreeSitterSyntaxTree(input: {
+  filePath: string
+  content: string
+}): Promise<TreeSitterParseResult | undefined> {
+  const loaded = await getParser(input.filePath).catch(() => null)
+  if (!loaded) return undefined
+
+  try {
+    const tree = loaded.parser.parse(input.content)
+    if (!tree?.rootNode) return undefined
+    return {
+      language: loaded.language,
+      rootNode: tree.rootNode,
+    }
+  } catch {
+    return undefined
+  }
 }
 
 function normalizeText(text: string) {

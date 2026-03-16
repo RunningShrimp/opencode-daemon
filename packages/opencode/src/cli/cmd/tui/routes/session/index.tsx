@@ -3,6 +3,7 @@ import {
   createContext,
   createEffect,
   createMemo,
+  createResource,
   createSignal,
   For,
   Match,
@@ -82,6 +83,11 @@ import { formatTranscript } from "../../util/transcript"
 import { UI } from "@/cli/ui.ts"
 import { useTuiConfig } from "../../context/tui-config"
 import { getRenderableRevertState } from "./revert-window"
+import { ToolRegistry } from "@/tool/registry"
+
+function isMissingInstanceContext(error: unknown) {
+  return error instanceof Error && error.message.includes("No context found for instance")
+}
 
 addDefaultParsers(parsers.parsers)
 
@@ -104,6 +110,7 @@ const context = createContext<{
   showDetails: () => boolean
   showGenericToolOutput: () => boolean
   diffWrapMode: () => "word" | "none"
+  toolDescriptions: () => Record<string, string>
   sync: ReturnType<typeof useSync>
   tui: ReturnType<typeof useTuiConfig>
 }>()
@@ -118,11 +125,48 @@ export function Session() {
   const route = useRouteData("session")
   const { navigate } = useRoute()
   const sync = useSync()
+  const local = useLocal()
   const tuiConfig = useTuiConfig()
   const kv = useKV()
   const { theme } = useTheme()
   const promptRef = usePromptRef()
   const session = createMemo(() => sync.session.get(route.sessionID))
+  const [toolDescriptions] = createResource(
+    createMemo(() => {
+      const model = local.model.current()
+      const agent = local.agent.current()
+      if (!model || !agent) return undefined
+      return {
+        providerID: model.providerID,
+        modelID: model.modelID,
+        agentName: agent.name,
+      }
+    }),
+    async (source) => {
+      if (!source) return {}
+      const agent = sync.data.agent.find((item) => item.name === source.agentName)
+      if (!agent) return {}
+      try {
+        const tools = await ToolRegistry.tools(
+          {
+            providerID: source.providerID,
+            modelID: source.modelID,
+          },
+          agent,
+        )
+        return Object.fromEntries(
+          tools
+            .map((tool) => [tool.id, summarizeToolDescription(tool.description)] as const)
+            .filter((entry) => Boolean(entry[1])),
+        )
+      } catch (error) {
+        if (isMissingInstanceContext(error)) {
+          return {}
+        }
+        throw error
+      }
+    },
+  )
   const children = createMemo(() => {
     const parentID = session()?.parentID ?? session()?.id
     return sync.data.session
@@ -319,8 +363,6 @@ export function Session() {
       scroll.scrollTo(scroll.scrollHeight)
     }, 50)
   }
-
-  const local = useLocal()
 
   function moveFirstChild() {
     if (children().length === 1) return
@@ -1034,6 +1076,7 @@ export function Session() {
         showDetails,
         showGenericToolOutput,
         diffWrapMode,
+        toolDescriptions: () => toolDescriptions.latest ?? {},
         sync,
         tui: tuiConfig,
       }}
@@ -1483,8 +1526,15 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
   const ctx = use()
   const sync = useSync()
 
-  // Hide tool if showDetails is false and tool completed successfully
+  // Hide tool if showDetails is false and tool completed successfully.
+  // Keep runtime capability callouts visible even though they are emitted as internal tool parts.
   const shouldHide = createMemo(() => {
+    if (
+      props.part.state.status !== "pending" &&
+      props.part.state.metadata?.internal === true &&
+      !props.part.state.metadata?.capability
+    )
+      return true
     if (ctx.showDetails()) return false
     if (props.part.state.status !== "completed") return false
     return true
@@ -1577,6 +1627,17 @@ type ToolProps<T extends Tool.Info> = {
   output?: string
   part: ToolPart
 }
+
+function summarizeToolDescription(description?: string) {
+  if (!description) return ""
+  const lines = description
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("-") && !line.startsWith("<"))
+
+  return lines[0] ?? ""
+}
+
 function GenericTool(props: ToolProps<any>) {
   const { theme } = useTheme()
   const ctx = use()
@@ -1611,6 +1672,28 @@ function GenericTool(props: ToolProps<any>) {
           </Show>
         </box>
       </BlockTool>
+    </Show>
+  )
+}
+
+function ToolDescription(props: { part?: ToolPart }) {
+  const ctx = use()
+  const { theme } = useTheme()
+  const description = createMemo(() => {
+    if (!props.part) return ""
+    if (props.part.state.status !== "pending") {
+      const inline = props.part.state.metadata?.description
+      const summarized = typeof inline === "string" ? summarizeToolDescription(inline) : ""
+      if (summarized) return summarized
+    }
+    return ctx.toolDescriptions()[props.part.tool] ?? ""
+  })
+
+  return (
+    <Show when={description()}>
+      <text paddingLeft={3} fg={theme.textMuted}>
+        {description()}
+      </text>
     </Show>
   )
 }
@@ -1669,6 +1752,7 @@ function InlineTool(props: {
     <box
       marginTop={margin()}
       paddingLeft={3}
+      flexDirection="column"
       onMouseOver={() => props.onClick && setHover(true)}
       onMouseOut={() => setHover(false)}
       onMouseUp={() => {
@@ -1710,6 +1794,7 @@ function InlineTool(props: {
           </text>
         </Match>
       </Switch>
+      <ToolDescription part={props.part} />
       <Show when={error() && !denied()}>
         <text fg={theme.error}>{error()}</text>
       </Show>
@@ -1756,6 +1841,7 @@ function BlockTool(props: {
       >
         <Spinner color={theme.textMuted}>{props.title.replace(/^# /, "")}</Spinner>
       </Show>
+      <ToolDescription part={props.part} />
       {props.children}
       <Show when={error()}>
         <text fg={theme.error}>{error()}</text>

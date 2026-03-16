@@ -92,9 +92,10 @@ export class BackgroundServiceManager extends EventEmitter {
 
     try {
       await service.start()
-      this.status.set(name, "ready")
-      this.emit("status", { name, status: "ready" })
-      log.info("service ready", { name })
+      const nextStatus = service.getStatus()
+      this.status.set(name, nextStatus)
+      this.emit("status", { name, status: nextStatus })
+      log.info("service started", { name, status: nextStatus })
     } catch (error) {
       log.error("service start failed", { name, error: String(error) })
       this.status.set(name, "error")
