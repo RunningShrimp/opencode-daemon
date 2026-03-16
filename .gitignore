@@ -17,7 +17,7 @@ ts-dist
 /result
 refs
 Session.vim
-opencode.json
+/opencode.json
 a.out
 target
 .scripts
@@ -28,6 +28,7 @@ opencode-dev
 logs/
 *.bun-build
 tsconfig.tsbuildinfo
+dev.log.snapshot
 
 # Memoir plugin databases
 .opencode/memoir/memory.db

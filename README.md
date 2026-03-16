@@ -30,59 +30,41 @@ OpenCode Daemon 是一个基于 [anomalyco/opencode](https://github.com/anomalyc
 这个 fork 的重点不是改写产品方向，而是持续修正官方版本在高频真实使用中的几个痛点：
 
 - 长时间运行时的 TUI 稳定性
+- Web / TUI 会话页在大历史窗口下的可用性
+- agent 执行链路的自驱动与子任务调度能力
 - Thinking 模型与多 provider 的一致性
 - 大会话下的 turn-control 与 compaction 行为
 - Skills / LSP / MCP 路径上的性能与并发
+- 面向编辑工具的 hashline 定位与校验基础设施
 - 中国大陆网络环境下的模型资源可用性
 - fork 仓库的手动发布、二进制兼容和本地替换流程
 
 如果你需要官方稳定发布，请优先关注上游仓库。
 如果你需要更激进的 daemon/TUI 优化、`opencoded` 兼容二进制、以及面向本地维护者的发布与验证能力，这个仓库就是针对这些场景维护的。
 
-## 相比官方版本的主要优化
+## 这个版本相对官方版补强了什么
 
-### TUI 稳定性
+这个 fork 不试图改变 OpenCode 的产品方向，而是更关注官方版本在高频、长时、真实项目环境里暴露出来的几个问题，并把它们往“更稳、更可控、更适合本地维护”的方向推进。
 
-- 修复 session revert 锚点落在 100 条消息窗口之外时主面板空白的问题。
-- 修复 `message.part.delta` 先于 `part.updated` 到达时的竞态问题。
-- 清理事件监听与进程关闭路径，减少长时间运行后的渲染异常和悬挂子进程。
-- 提升终端兼容性，优化工具执行中的状态展示。
+首先是会话体验，尤其是大历史窗口下的 TUI 可用性。我们重点修了长会话首屏卡顿、回滚后主面板空白、终端面板偶发空白、流式消息时序竞态这类问题，并把消息列表改成“最近 turns 优先渲染，向上滚动再逐批补历史”的方式。对外表现就是：长会话更能用，不容易一滚就卡，也不容易在切 session、revert 或工具流输出时把界面打乱。
 
-### 会话与智能控制
+其次是 agent 的收束质量。官方版本已经具备很强的工具调用和会话能力，但在复杂任务里，模型是否该继续、是否该压缩上下文、是否真的完成目标，仍然会受到单轮上下文和模型习惯影响。这个版本在这些点上加了更多运行时约束，包括 dynamic turn control、predictive compaction、self-driven agent、任务依赖阻断、QualityGate runtime enforcement，以及更完整的中英双语反迎合验证。简单说，就是尽量减少“看起来结束了，其实没做完”或者“回答很像对的，但证据不够”的情况。
 
-- 为 TUI prompt 接入统一的 prompt state 管理，收敛输入模式、占位符轮换、重置与打断逻辑。
-- 接入 dynamic turn control，让会话更保守地判断何时收束回合。
-- 接入 predictive compaction，提前判断压缩时机，降低长会话退化风险。
-- 将 MCP 默认超时提升到更适合真实环境的区间，减少慢工具误超时。
+再往下是代码理解和检索链路。我们把知识图谱、检索和项目记忆这条链路做得更偏工程化一些：知识图谱不再主要依赖浅层 regex，而是优先走 AST/tree-sitter；跨文件符号、import、调用和实例化关系的解析更细；embedding provider 支持显式切换并能暴露 ready、fallback、failed 等运行状态；workspace intelligence 也不再只是静态拼接上下文，而是增加了 sibling workspace 排序和跨项目经验迁移。对使用者来说，这会直接反映在更少的误连、更少的噪声上下文，以及更稳定的自动补全与检索结果上。
 
-### 性能与基础设施
+我们也补强了很多“官方版不一定优先处理，但本地维护非常需要”的基础设施。包括更稳健的并发队列和高频写路径、国内网络环境下的模型资源回退、GLM-5 和 MiniMax-M2.5 这类模型的缓存污染修复、日志与 XDG 路径兼容、`opencode` / `opencoded` 双二进制兼容，以及更适合 fork 仓库的手动发布和本地替换流程。这部分不是最显眼的功能，但会直接决定这个版本能不能被长期拿来当日常工作工具，而不只是“能跑一次”。
 
-- 引入并强化 `ConcurrencyLimiter`、`AsyncQueue` 和相关测试覆盖。
-- 实施 SkillsRouter 架构优化，降低 skills 扫描与加载的开销。
-- 增强 LSP 和 MCP Smart Router 路径，减少高并发下的阻塞。
-- 增加 session error handler、workspace integration 和自驱动 agent 能力相关改进。
-
-### 国内网络与模型可用性
-
-- 对 Hugging Face 资源下载增加多源回退：ModelScope 优先尝试、`hf-mirror.com` 次之、官方源最后。
-- 单个下载源失败不会阻断整体流程；embedding 路径在失败时仍可继续使用 hash fallback。
-- 修复 snapshot / models-cache 污染导致的模型失效问题，尤其是 `zhipuai-coding-plan/glm-5` 和 `minimax-cn-coding-plan/MiniMax-M2.5` 这类实际验证过的模型。
-- 降低可选 provider 自定义加载器缺失时的误报 ERROR 日志。
-
-### 构建、路径与发布
-
-- 兼容 `opencode` 与 `opencoded` 双二进制名称。
-- 保持官方 XDG 数据和配置目录兼容，同时把日志隔离到 `XDG_STATE_HOME/opencoded/log`。
-- 保持 `.local/bin` 路径识别与 curl 安装行为兼容。
-- 发布 CI 支持 fork 仓库手动触发，缺少 GitHub App 密钥时自动回退 `github.token`。
-- 手动发布默认只做 GitHub Release 相关流程，不再强制依赖 npm、docker、Homebrew 或 AUR 发布权限。
+如果要概括这个版本和官方版的差异，可以理解为：官方版更像快速演进的主线产品，这个版本更像围绕 daemon、TUI、本地运行与长期维护做过一轮实战加固的分支。它没有试图重写 OpenCode，而是在尽量保持兼容的前提下，把稳定性、收束质量、检索准确性和维护体验往前推了一步。
 
 ## 已验证的重点场景
 
 - 使用 tmux 隔离环境启动本仓库 TUI。
 - 提交普通提示词后，模型可正常接收、渲染和返回结果。
 - 在 GLM-5 和 MiniMax-M2.5 下可看到 Thinking 标记。
+- 大会话下首屏只渲染最近 turns，向上滚动时可以逐批展开并继续拉取更早历史。
 - 执行 `/session` 和 `/sessions` 时主界面可以正常渲染。
+- 打开 terminal panel 时可以自动补建可用终端，并在切换后恢复焦点。
+- 文件标签页中的行级评论可以直接进入 prompt context，编辑和删除会同步更新上下文内容。
 - 日志路径可稳定产出日志并用于排查 ERROR。
 - 当前平台二进制可打包为 `opencoded` 并替换到本地 `.local/bin`。
 
@@ -125,6 +107,53 @@ install -m 755 ./packages/opencode/dist/opencode-darwin-arm64/bin/opencoded ~/.l
 ```
 
 这个脚本会在隔离的 XDG 环境下进行 TUI 验证，避免你的用户数据和缓存影响结果。
+
+## Embedding Provider 配置
+
+当前默认行为：
+
+- 未设置 `OPENCODE_EMBEDDING_PROVIDER` 时，后台优先启动 transformers provider。
+- provider 初始化失败时会自动回退到语义 fallback，不阻塞会话启动。
+- 会话 system prompt 会注入 `<embedding_runtime>` 状态块，便于观察当前活跃 provider 与失败原因。
+
+可用 provider：
+
+- `fallback`
+- `transformers`
+- `openai`
+- `cohere`
+- `voyage`
+
+核心环境变量：
+
+- `OPENCODE_EMBEDDING_PROVIDER`：选择 provider。
+- `OPENCODE_EMBEDDING_MODEL`：外部 provider 模型名覆盖。
+- `OPENCODE_EMBEDDING_BASE_URL`：外部 provider base URL 覆盖。
+- `OPENCODE_EMBEDDING_DIMENSIONS`：输出维度覆盖（正整数）。
+
+外部 provider key 优先级：
+
+- OpenAI：`OPENCODE_OPENAI_API_KEY` → `OPENAI_API_KEY` → `OPENCODE_EMBEDDING_API_KEY`
+- Cohere：`OPENCODE_COHERE_API_KEY` → `COHERE_API_KEY` → `OPENCODE_EMBEDDING_API_KEY`
+- Voyage：`OPENCODE_VOYAGE_API_KEY` → `VOYAGE_API_KEY` → `OPENCODE_EMBEDDING_API_KEY`
+
+示例：
+
+```bash
+export OPENCODE_EMBEDDING_PROVIDER=openai
+export OPENCODE_OPENAI_API_KEY=sk-xxxx
+export OPENCODE_EMBEDDING_MODEL=text-embedding-3-small
+```
+
+```bash
+export OPENCODE_EMBEDDING_PROVIDER=voyage
+export OPENCODE_VOYAGE_API_KEY=voyage-xxxx
+export OPENCODE_EMBEDDING_MODEL=voyage-3-lite
+```
+
+```bash
+export OPENCODE_EMBEDDING_PROVIDER=fallback
+```
 
 ## 安装路径与运行时目录
 
