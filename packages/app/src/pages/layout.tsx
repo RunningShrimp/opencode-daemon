@@ -669,12 +669,12 @@ export default function Layout(props: ParentProps) {
   const prefetchQueues = new Map<string, PrefetchQueue>()
 
   const PREFETCH_MAX_SESSIONS_PER_DIR = 10
-  const prefetchedByDir = new Map<string, Map<string, true>>()
+  const prefetchedByDir = new Map<string, Set<string>>()
 
   const lruFor = (directory: string) => {
     const existing = prefetchedByDir.get(directory)
     if (existing) return existing
-    const created = new Map<string, true>()
+    const created = new Set<string>()
     prefetchedByDir.set(directory, created)
     return created
   }

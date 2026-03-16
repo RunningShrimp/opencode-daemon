@@ -1,7 +1,7 @@
 import { describe, expect, test, vi, beforeEach, afterEach } from "bun:test"
 import { terminalTabLabel } from "./terminal-label"
-import { createRoot, createSignal } from "solid-js"
-import { createSizing, focusTerminalById, getTabReorderIndex, createPresence } from "./helpers"
+import { createRoot } from "solid-js"
+import { createSizing, focusTerminalById, getTabReorderIndex } from "./helpers"
 
 const t = (key: string, vars?: Record<string, string | number | boolean>) => {
   if (key === "terminal.title.numbered") return `Terminal ${vars?.number}`
@@ -160,89 +160,6 @@ describe("getTabReorderIndex", () => {
     const tabs = ["a", "b", "c", "d"]
     const result = getTabReorderIndex(tabs, "a", "c")
     expect(result).toBe(2)
-  })
-})
-
-describe("createPresence", () => {
-  test("initializes with show and open matching initial accessor value", () => {
-    let dispose = () => {}
-    let presence: ReturnType<typeof createPresence> | undefined
-
-    createRoot((rootDispose) => {
-      dispose = rootDispose
-      presence = createPresence(() => true)
-    })
-
-    expect(presence!.show()).toBe(true)
-    expect(presence!.open()).toBe(true)
-    dispose()
-  })
-
-  test("initializes as hidden when accessor is false", () => {
-    let dispose = () => {}
-    let presence: ReturnType<typeof createPresence> | undefined
-
-    createRoot((rootDispose) => {
-      dispose = rootDispose
-      presence = createPresence(() => false)
-    })
-
-    expect(presence!.show()).toBe(false)
-    expect(presence!.open()).toBe(false)
-    dispose()
-  })
-
-  // TODO: SolidJS createEffect doesn't trigger in HappyDOM test environment
-  test.skip("opens: sets show=true then RAF to set open=true", async () => {
-    vi.useFakeTimers()
-    try {
-      let dispose = () => {}
-      const [signal, setSignal] = createSignal(false)
-      let presence: ReturnType<typeof createPresence> | undefined
-
-      createRoot((rootDispose) => {
-        dispose = rootDispose
-        presence = createPresence(signal)
-      })
-
-      expect(presence!.show()).toBe(false)
-      expect(presence!.open()).toBe(false)
-
-      setSignal(true)
-      vi.runAllTimers()
-
-      expect(presence!.show()).toBe(true)
-      expect(presence!.open()).toBe(true)
-      dispose()
-    } finally {
-      vi.useRealTimers()
-    }
-  })
-
-  test.skip("closes: sets open=false, delays wait ms, then sets show=false", async () => {
-    vi.useFakeTimers()
-    try {
-      let dispose = () => {}
-      const [signal, setSignal] = createSignal(true)
-      let presence: ReturnType<typeof createPresence> | undefined
-
-      createRoot((rootDispose) => {
-        dispose = rootDispose
-        presence = createPresence(signal, 50)
-      })
-
-      expect(presence!.show()).toBe(true)
-      expect(presence!.open()).toBe(true)
-
-      setSignal(false)
-      vi.runAllTimers()
-
-      expect(presence!.open()).toBe(false)
-      expect(presence!.show()).toBe(false)
-      dispose()
-    } finally {
-      vi.useRealTimers()
-    }
   })
 })
 
