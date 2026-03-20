@@ -43,16 +43,16 @@ export namespace Terminal {
             if (code === "11") {
               // background color
               const [r, g, b] = colors.split(";").map((c) => parseInt(c, 10))
-              background = { r, g, b, a: 255 }
+              background = RGBA.fromInts(r, g, b, 255)
             } else if (code === "10") {
               // foreground color
               const [r, g, b] = colors.split(";").map((c) => parseInt(c, 10))
-              foreground = { r, g, b, a: 255 }
+              foreground = RGBA.fromInts(r, g, b, 255)
             } else if (code === "4") {
               // palette colors
               const [index, r, g, b] = colors.split(";").map((c) => parseInt(c, 10))
               if (!isNaN(index) && !isNaN(r) && !isNaN(g) && !isNaN(b)) {
-                paletteColors[index] = { r, g, b, a: 255 }
+                paletteColors[index] = RGBA.fromInts(r, g, b, 255)
               }
             }
           }

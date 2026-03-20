@@ -8,6 +8,7 @@ import {
   For,
   Match,
   on,
+  onCleanup,
   onMount,
   Show,
   Switch,
@@ -17,6 +18,7 @@ import { Dynamic } from "solid-js/web"
 import path from "path"
 import { useRoute, useRouteData } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
+import { ModelID, ProviderID } from "@/provider/schema"
 import { SplitBorder } from "@tui/component/border"
 import { Spinner } from "@tui/component/spinner"
 import { selectedForeground, useTheme } from "@tui/context/theme"
@@ -84,6 +86,12 @@ import { UI } from "@/cli/ui.ts"
 import { useTuiConfig } from "../../context/tui-config"
 import { getRenderableRevertState } from "./revert-window"
 import { ToolRegistry } from "@/tool/registry"
+import {
+  countRenderableMessages,
+  getSessionSwitchBottomAlignAction,
+  getPrependedHistoryRestoreScrollY,
+  shouldAutoLoadMoreHistoryAtTop,
+} from "@tui/context/sync-history"
 
 function isMissingInstanceContext(error: unknown) {
   return error instanceof Error && error.message.includes("No context found for instance")
@@ -132,7 +140,14 @@ export function Session() {
   const promptRef = usePromptRef()
   const session = createMemo(() => sync.session.get(route.sessionID))
   const [toolDescriptions] = createResource(
-    createMemo(() => {
+    createMemo<
+      | {
+          providerID: string
+          modelID: string
+          agentName: string
+        }
+      | undefined
+    >(() => {
       const model = local.model.current()
       const agent = local.agent.current()
       if (!model || !agent) return undefined
@@ -149,10 +164,10 @@ export function Session() {
       try {
         const tools = await ToolRegistry.tools(
           {
-            providerID: source.providerID,
-            modelID: source.modelID,
+            providerID: ProviderID.make(source.providerID),
+            modelID: ModelID.make(source.modelID),
           },
-          agent,
+          agent as any,
         )
         return Object.fromEntries(
           tools
@@ -174,6 +189,7 @@ export function Session() {
       .toSorted((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   })
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
+  const sessionHistory = createMemo(() => sync.data.session_history[route.sessionID])
   const permissions = createMemo(() => {
     if (session()?.parentID) return []
     return children().flatMap((x) => sync.data.permission[x.id] ?? [])
@@ -234,15 +250,18 @@ export function Session() {
   })
 
   createEffect(async () => {
+    const sessionID = route.sessionID
+    requestSessionSwitchBottomAlign(sessionID)
     await sync.session
-      .sync(route.sessionID)
+      .sync(sessionID)
       .then(() => {
-        if (scroll) scroll.scrollBy(100_000)
+        if (route.sessionID !== sessionID) return
+        requestSessionSwitchBottomAlign(sessionID)
       })
       .catch((e) => {
         console.error(e)
         toast.show({
-          message: `Session not found: ${route.sessionID}`,
+          message: `Session not found: ${sessionID}`,
           variant: "error",
         })
         return navigate({ type: "home" })
@@ -278,9 +297,13 @@ export function Session() {
 
   let scroll: ScrollBoxRenderable
   let prompt: PromptRef
+  let loadingMoreHistory = false
+  let backfillingInvisibleWindow = false
+  let sessionSwitchAlignTimer: ReturnType<typeof setTimeout> | undefined
   const keybind = useKeybind()
   const dialog = useDialog()
   const renderer = useRenderer()
+  const [pendingSessionSwitchBottomAlign, setPendingSessionSwitchBottomAlign] = createSignal<string | undefined>()
 
   // Allow exit when in child session (prompt is hidden)
   const exit = useExit()
@@ -309,6 +332,131 @@ export function Session() {
     if (keybind.match("app_exit", evt)) {
       exit()
     }
+  })
+
+  function requestSessionSwitchBottomAlign(sessionID: string) {
+    setPendingSessionSwitchBottomAlign(sessionID)
+    setTimeout(() => {
+      if (route.sessionID !== sessionID) return
+      if (pendingSessionSwitchBottomAlign() !== sessionID) return
+      toBottom(12, 25)
+    }, 0)
+  }
+
+  function settleSessionSwitchBottomAlign(sessionID: string) {
+    if (sessionSwitchAlignTimer) clearTimeout(sessionSwitchAlignTimer)
+    sessionSwitchAlignTimer = setTimeout(() => {
+      if (route.sessionID !== sessionID) return
+      if (pendingSessionSwitchBottomAlign() !== sessionID) return
+      setPendingSessionSwitchBottomAlign(undefined)
+    }, 250)
+  }
+
+  onMount(() => {
+    const timer = setInterval(() => {
+      if (!scroll) return
+      const sessionID = route.sessionID
+      const history = sessionHistory()
+      if (
+        !shouldAutoLoadMoreHistoryAtTop({
+          hasMore: !!history?.hasMore,
+          historyLoading: !!history?.loading,
+          historyPreloading: !!history?.preloading,
+          localLoading: loadingMoreHistory,
+          pendingSessionSwitchAlign: pendingSessionSwitchBottomAlign() === sessionID,
+          scrollY: scroll.y,
+          scrollHeight: scroll.scrollHeight,
+          viewportHeight: scroll.height,
+        })
+      ) {
+        return
+      }
+
+      loadingMoreHistory = true
+      const previousHeight = scroll.scrollHeight
+      const previousY = scroll.y
+      void sync.session.loadMore(sessionID).finally(() => {
+        queueMicrotask(() => {
+          if (scroll) {
+            const restoreY = getPrependedHistoryRestoreScrollY({
+              requestedSessionID: sessionID,
+              activeSessionID: route.sessionID,
+              previousY,
+              previousScrollHeight: previousHeight,
+              nextScrollHeight: scroll.scrollHeight,
+            })
+            if (restoreY !== undefined) {
+              scroll.scrollTo(restoreY)
+            }
+          }
+          loadingMoreHistory = false
+        })
+      })
+    }, 150)
+
+    onCleanup(() => clearInterval(timer))
+  })
+
+  const renderableMessageCount = createMemo(() => countRenderableMessages(messages(), sync.data.part))
+
+  const backfillInvisibleWindow = async (sessionID: string) => {
+    if (backfillingInvisibleWindow) return
+    backfillingInvisibleWindow = true
+
+    try {
+      let attempts = 0
+      while (attempts < 8) {
+        if (route.sessionID !== sessionID) break
+        const history = sessionHistory()
+        if (!history?.hasMore || history.loading || history.preloading) break
+        if (renderableMessageCount() > 0) break
+
+        const previousLength = messages().length
+        const previousCursor = history.nextCursor
+        await sync.session.loadMore(sessionID)
+        attempts += 1
+
+        if (route.sessionID !== sessionID) break
+        const nextHistory = sessionHistory()
+        if (renderableMessageCount() > 0) break
+        if (messages().length === previousLength && nextHistory?.nextCursor === previousCursor) break
+      }
+    } finally {
+      backfillingInvisibleWindow = false
+    }
+  }
+
+  createEffect(() => {
+    if (!session()) return
+    const sessionID = route.sessionID
+    const history = sessionHistory()
+    if (!history?.hasMore || history.loading || history.preloading) return
+    if (renderableMessageCount() > 0) return
+    void backfillInvisibleWindow(sessionID)
+  })
+
+  createEffect(() => {
+    const pendingSessionID = pendingSessionSwitchBottomAlign()
+    if (!pendingSessionID || pendingSessionID !== route.sessionID) return
+
+    const history = sessionHistory()
+    const messageCount = messages().length
+    const renderableCount = renderableMessageCount()
+    const action = getSessionSwitchBottomAlignAction({
+      historyLoading: !!history?.loading,
+      messageCount,
+      renderableCount,
+      hasMore: !!history?.hasMore,
+    })
+
+    if (action === "wait") return
+    if (action === "settle") {
+      settleSessionSwitchBottomAlign(pendingSessionID)
+      return
+    }
+
+    toBottom(12, 25)
+    settleSessionSwitchBottomAlign(pendingSessionID)
   })
 
   // Helper: Find next visible message boundary in direction
@@ -357,11 +505,21 @@ export function Session() {
     dialog.clear()
   }
 
-  function toBottom() {
-    setTimeout(() => {
+  function scrollBottomGap() {
+    if (!scroll || scroll.isDestroyed) return 0
+    return Math.max(0, scroll.scrollHeight - (scroll.y + scroll.height))
+  }
+
+  function toBottom(retries = 6, delay = 16) {
+    const align = () => {
       if (!scroll || scroll.isDestroyed) return
       scroll.scrollTo(scroll.scrollHeight)
-    }, 50)
+      if (retries <= 0 || scrollBottomGap() <= 1) return
+      retries -= 1
+      setTimeout(align, delay)
+    }
+
+    setTimeout(align, 0)
   }
 
   function moveFirstChild() {
@@ -1061,7 +1219,14 @@ export function Session() {
   })
 
   // snap to bottom when session changes
-  createEffect(on(() => route.sessionID, toBottom))
+  createEffect(
+    on(() => route.sessionID, () => {
+      loadingMoreHistory = false
+      backfillingInvisibleWindow = false
+      if (sessionSwitchAlignTimer) clearTimeout(sessionSwitchAlignTimer)
+      requestSessionSwitchBottomAlign(route.sessionID)
+    }),
+  )
 
   return (
     <context.Provider
@@ -1087,24 +1252,31 @@ export function Session() {
             <Show when={showHeader() && (!sidebarVisible() || !wide())}>
               <Header />
             </Show>
-            <scrollbox
-              ref={(r) => (scroll = r)}
-              viewportOptions={{
-                paddingRight: showScrollbar() ? 1 : 0,
-              }}
-              verticalScrollbarOptions={{
-                paddingLeft: 1,
-                visible: showScrollbar(),
-                trackOptions: {
-                  backgroundColor: theme.backgroundElement,
-                  foregroundColor: theme.border,
-                },
-              }}
-              stickyScroll={true}
-              stickyStart="bottom"
-              flexGrow={1}
-              scrollAcceleration={scrollAcceleration()}
-            >
+            <Show when={route.sessionID} keyed>
+              {(sessionID) => (
+                <scrollbox
+                  ref={(r) => {
+                    scroll = r
+                    if (pendingSessionSwitchBottomAlign() === sessionID) {
+                      toBottom(12, 25)
+                    }
+                  }}
+                  viewportOptions={{
+                    paddingRight: showScrollbar() ? 1 : 0,
+                  }}
+                  verticalScrollbarOptions={{
+                    paddingLeft: 1,
+                    visible: showScrollbar(),
+                    trackOptions: {
+                      backgroundColor: theme.backgroundElement,
+                      foregroundColor: theme.border,
+                    },
+                  }}
+                  stickyScroll={true}
+                  stickyStart="bottom"
+                  flexGrow={1}
+                  scrollAcceleration={scrollAcceleration()}
+                >
               <For each={messages()}>
                 {(message, index) => (
                   <Switch>
@@ -1200,7 +1372,9 @@ export function Session() {
                   </Switch>
                 )}
               </For>
-            </scrollbox>
+                </scrollbox>
+              )}
+            </Show>
             <box flexShrink={0}>
               <Show when={permissions().length > 0}>
                 <PermissionPrompt request={permissions()[0]} />
@@ -1529,12 +1703,9 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
   // Hide tool if showDetails is false and tool completed successfully.
   // Keep runtime capability callouts visible even though they are emitted as internal tool parts.
   const shouldHide = createMemo(() => {
-    if (
-      props.part.state.status !== "pending" &&
-      props.part.state.metadata?.internal === true &&
-      !props.part.state.metadata?.capability
-    )
+    if (props.part.state.status !== "pending" && props.part.state.metadata?.internal === true) {
       return true
+    }
     if (ctx.showDetails()) return false
     if (props.part.state.status !== "completed") return false
     return true
@@ -2298,9 +2469,34 @@ function Question(props: ToolProps<typeof QuestionTool>) {
 }
 
 function Skill(props: ToolProps<typeof SkillTool>) {
+  const { theme } = useTheme()
+  const error = createMemo(() => (props.part.state.status === "error" ? props.part.state.error : undefined))
+  const isLoading = createMemo(() => props.part.state.status === "pending")
+  const hasSkillName = createMemo(() => !!props.input.name)
+
+  const errorMessage = createMemo(() => {
+    if (!error()) return undefined
+    const err = error()!
+    if (err.includes("Permission denied")) {
+      return `Permission denied for skill "${props.input.name}"`
+    }
+    if (err.includes("not found")) {
+      return err
+    }
+    return `Failed to load skill "${props.input.name}": ${err}`
+  })
+
   return (
-    <InlineTool icon="→" pending="Loading skill..." complete={props.input.name} part={props.part}>
-      Skill "{props.input.name}"
+    <InlineTool
+      icon="→"
+      pending={hasSkillName() ? `Loading skill "${props.input.name}"...` : "Loading skill..."}
+      complete={hasSkillName() ? props.input.name : undefined}
+      spinner={isLoading()}
+      part={props.part}
+    >
+      <Show when={hasSkillName()} fallback={<>Skill (no name specified)</>}>
+        Skill "{props.input.name}"
+      </Show>
     </InlineTool>
   )
 }

@@ -69,7 +69,7 @@ LOG_DIR_LEGACY="$TEST_ENV/data/opencode/log"
 LOG_FILE_PRIMARY="$LOG_DIR_PRIMARY/dev.log"
 LOG_FILE_LEGACY="$LOG_DIR_LEGACY/dev.log"
 LOG_FILE="$LOG_FILE_PRIMARY"
-DB_FILE="$TEST_ENV/data/opencode/opencode-dev.db"
+DB_FILE=""
 INITIAL_CAPTURE="/tmp/tui-validate-${MODEL_SLUG}-${RUN_ID}-initial.txt"
 SESSION_CAPTURE="/tmp/tui-validate-${MODEL_SLUG}-${RUN_ID}-session.txt"
 SESSIONS_CAPTURE="/tmp/tui-validate-${MODEL_SLUG}-${RUN_ID}-sessions.txt"
@@ -146,7 +146,8 @@ rm -rf "$TEST_ENV/data/opencode/log"
 rm -rf "$TEST_ENV/data/opencoded/log"
 rm -rf "$TEST_ENV/state/opencoded/log"
 rm -rf "$TEST_ENV/data/opencode/sochdb"
-rm -f "$TEST_ENV/data/opencode/opencode-dev.db"
+rm -f "$TEST_ENV/data/opencode"/opencode*.db(N)
+rm -f "$TEST_ENV/data/opencode"/opencode*.db-*(N)
 rm -rf "$TEST_ENV/data/opencode/models-cache"
 
 if [[ -f "$REAL_COMPAT_DATA_DIR/auth.json" && ! -f "$TEST_ENV/data/opencode/auth.json" ]]; then
@@ -196,11 +197,31 @@ sql_escape() {
   print -nr -- "${value//\'/\'\'}"
 }
 
+resolve_db_file() {
+  if [[ -n "$DB_FILE" && -f "$DB_FILE" ]]; then
+    return 0
+  fi
+
+  local candidates=()
+  candidates=(
+    "$TEST_ENV/data/opencode/opencode-local.db"(N)
+    "$TEST_ENV/data/opencode/opencode.db"(N)
+    "$TEST_ENV/data/opencode/opencode-dev.db"(N)
+    "$TEST_ENV/data/opencode"/opencode*.db(N)
+  )
+  if (( ${#candidates[@]} == 0 )); then
+    return 1
+  fi
+
+  DB_FILE="$candidates[1]"
+  return 0
+}
+
 resolve_session_db_id() {
   if [[ -n "$SESSION_DB_ID" ]]; then
     return 0
   fi
-  if ! command -v sqlite3 >/dev/null 2>&1 || [[ ! -f "$DB_FILE" ]]; then
+  if ! command -v sqlite3 >/dev/null 2>&1 || ! resolve_db_file; then
     return 1
   fi
   local latest
@@ -397,6 +418,7 @@ fi
   echo "prompt_status=$PROMPT_STATUS"
   echo "thinking_visible=$THINKING_VISIBLE"
   echo "final_visible=$FINAL_VISIBLE"
+  echo "db_file=$DB_FILE"
   echo "session_db_id=$SESSION_DB_ID"
   echo "emitted_capabilities=$EMITTED_CAPABILITIES"
   echo "log_exists=$LOG_EXISTS"

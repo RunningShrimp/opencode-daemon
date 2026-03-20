@@ -1,26 +1,49 @@
 import { useSync } from "@tui/context/sync"
-import { createMemo, For, Show, Switch, Match } from "solid-js"
+import { createEffect, createMemo, createSignal, For, Show, Switch, Match } from "solid-js"
 import { createStore } from "solid-js/store"
 import { useTheme } from "../../context/theme"
-import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import { Installation } from "@/installation"
 import { useDirectory } from "../../context/directory"
 import { useKV } from "../../context/kv"
+import { useRenderer } from "@opentui/solid"
+import path from "node:path"
+import { Editor } from "../../util/editor"
 import { TodoItem } from "../../component/todo-item"
+
+function humanizeLabel(value: string) {
+  return value
+    .split(/[_-]+/g)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ")
+}
+
+function clip(text: string | undefined, max = 88) {
+  if (!text) return ""
+  const normalized = text.replace(/\s+/g, " ").trim()
+  if (normalized.length <= max) return normalized
+  return normalized.slice(0, max - 1).trimEnd() + "…"
+}
 
 export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
   const sync = useSync()
-  const { theme } = useTheme()
+  const renderer = useRenderer()
+  const { theme, syntax } = useTheme()
   const session = createMemo(() => sync.session.get(props.sessionID)!)
   const diff = createMemo(() => sync.data.session_diff[props.sessionID] ?? [])
-  const todo = createMemo(() => sync.data.todo[props.sessionID] ?? [])
   const messages = createMemo(() => sync.data.message[props.sessionID] ?? [])
+  const todos = createMemo(() => sync.data.todo[props.sessionID] ?? [])
+  const knowledgeGraph = createMemo(() => sync.data.knowledge_graph[props.sessionID])
+  const [lastDiffClick, setLastDiffClick] = createSignal<{ file: string; at: number }>()
 
   const [expanded, setExpanded] = createStore({
     mcp: true,
-    diff: true,
     todo: true,
+    diff: true,
     lsp: true,
+    knowledge: true,
+    knowledgeGroups: {} as Record<string, boolean>,
+    knowledgeNodes: {} as Record<string, boolean>,
   })
 
   // Sort MCP servers alphabetically for consistent display order
@@ -36,28 +59,35 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
       ).length,
   )
 
-  const cost = createMemo(() => {
-    const total = messages().reduce((sum, x) => sum + (x.role === "assistant" ? x.cost : 0), 0)
-    return new Intl.NumberFormat("en-US", {
-      style: "currency",
-      currency: "USD",
-    }).format(total)
-  })
-
-  const context = createMemo(() => {
-    const last = messages().findLast((x) => x.role === "assistant" && x.tokens.output > 0) as AssistantMessage
-    if (!last) return
-    const total =
-      last.tokens.input + last.tokens.output + last.tokens.reasoning + last.tokens.cache.read + last.tokens.cache.write
-    const model = sync.data.provider.find((x) => x.id === last.providerID)?.models[last.modelID]
-    return {
-      tokens: total.toLocaleString(),
-      percentage: model?.limit.context ? Math.round((total / model.limit.context) * 100) : null,
-    }
-  })
-
   const directory = useDirectory()
   const kv = useKV()
+
+  createEffect(() => {
+    messages().length
+    void sync.session.refreshKnowledgeGraph(props.sessionID)
+  })
+
+  async function openModifiedFileReview(file: string) {
+    const current = diff().find((item) => item.file === file)
+    if (!current) return
+    const root = sync.data.path.worktree || session().directory
+    const filepath = path.isAbsolute(file) ? file : path.resolve(root, file)
+    await Editor.openDiff({
+      filepath,
+      before: current.before,
+      after: current.after,
+      renderer,
+    })
+  }
+
+  function handleDiffRowClick(file: string) {
+    const now = Date.now()
+    const last = lastDiffClick()
+    if (last?.file === file && now - last.at < 350) {
+      void openModifiedFileReview(file)
+    }
+    setLastDiffClick({ file, at: now })
+  }
 
   const hasProviders = createMemo(() =>
     sync.data.provider.some((x) => x.id !== "opencode" || Object.values(x.models).some((y) => y.cost?.input !== 0)),
@@ -93,14 +123,6 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
               <Show when={session().share?.url}>
                 <text fg={theme.textMuted}>{session().share!.url}</text>
               </Show>
-            </box>
-            <box>
-              <text fg={theme.text}>
-                <b>Context</b>
-              </text>
-              <text fg={theme.textMuted}>{context()?.tokens ?? 0} tokens</text>
-              <text fg={theme.textMuted}>{context()?.percentage ?? 0}% used</text>
-              <text fg={theme.textMuted}>{cost()} spent</text>
             </box>
             <Show when={mcpEntries().length > 0}>
               <box>
@@ -206,22 +228,27 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                 </For>
               </Show>
             </box>
-            <Show when={todo().length > 0 && todo().some((t) => t.status !== "completed")}>
+            <Show when={todos().length > 0}>
               <box>
                 <box
                   flexDirection="row"
                   gap={1}
-                  onMouseDown={() => todo().length > 2 && setExpanded("todo", !expanded.todo)}
+                  onMouseDown={() => todos().length > 3 && setExpanded("todo", !expanded.todo)}
                 >
-                  <Show when={todo().length > 2}>
+                  <Show when={todos().length > 3}>
                     <text fg={theme.text}>{expanded.todo ? "▼" : "▶"}</text>
                   </Show>
                   <text fg={theme.text}>
                     <b>Todo</b>
+                    <Show when={!expanded.todo}>
+                      <span style={{ fg: theme.textMuted }}>
+                        {` (${todos().filter((item) => item.status !== "completed").length} active)`}
+                      </span>
+                    </Show>
                   </text>
                 </box>
-                <Show when={todo().length <= 2 || expanded.todo}>
-                  <For each={todo()}>{(todo) => <TodoItem status={todo.status} content={todo.content} />}</For>
+                <Show when={todos().length <= 3 || expanded.todo}>
+                  <For each={todos()}>{(todo) => <TodoItem status={todo.status} content={todo.content} />}</For>
                 </Show>
               </box>
             </Show>
@@ -240,10 +267,11 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                   </text>
                 </box>
                 <Show when={diff().length <= 2 || expanded.diff}>
+                  <text fg={theme.textMuted}>Double-click a file to review the diff in vim.</text>
                   <For each={diff() || []}>
                     {(item) => {
                       return (
-                        <box flexDirection="row" gap={1} justifyContent="space-between">
+                        <box flexDirection="row" gap={1} justifyContent="space-between" onMouseUp={() => handleDiffRowClick(item.file)}>
                           <text fg={theme.textMuted} wrapMode="none">
                             {item.file}
                           </text>
@@ -258,6 +286,84 @@ export function Sidebar(props: { sessionID: string; overlay?: boolean }) {
                         </box>
                       )
                     }}
+                  </For>
+                </Show>
+              </box>
+            </Show>
+            <Show when={knowledgeGraph()}>
+              <box>
+                <box flexDirection="row" gap={1} onMouseDown={() => setExpanded("knowledge", !expanded.knowledge)}>
+                  <text fg={theme.text}>{expanded.knowledge ? "▼" : "▶"}</text>
+                  <text fg={theme.text}>
+                    <b>Knowledge Graph</b>
+                    <span style={{ fg: theme.textMuted }}>
+                      {` ${knowledgeGraph()!.stats.nodeCount} nodes / ${knowledgeGraph()!.stats.edgeCount} edges`}
+                    </span>
+                  </text>
+                </box>
+                <Show when={expanded.knowledge}>
+                  <Show when={knowledgeGraph()!.relevant.length > 0}>
+                    <box flexDirection="column" gap={0}>
+                      <text fg={theme.textMuted}>Relevant</text>
+                      <For each={knowledgeGraph()!.relevant}>
+                        {(node) => (
+                          <box flexDirection="column" paddingLeft={1}>
+                            <text fg={theme.text}>{node.name}</text>
+                            <Show when={node.path}>
+                              <text fg={theme.textMuted}>{clip(node.path, 72)}</text>
+                            </Show>
+                          </box>
+                        )}
+                      </For>
+                    </box>
+                  </Show>
+                  <For each={knowledgeGraph()!.groups}>
+                    {(group) => (
+                      <box flexDirection="column">
+                        <box
+                          flexDirection="row"
+                          gap={1}
+                          onMouseDown={() => setExpanded("knowledgeGroups", group.type, !expanded.knowledgeGroups[group.type])}
+                        >
+                          <text fg={theme.text}>{expanded.knowledgeGroups[group.type] !== false ? "▼" : "▶"}</text>
+                          <text fg={theme.text}>
+                            {humanizeLabel(group.type)} <span style={{ fg: theme.textMuted }}>({group.count})</span>
+                          </text>
+                        </box>
+                        <Show when={expanded.knowledgeGroups[group.type] !== false}>
+                          <For each={group.nodes}>
+                            {(node) => (
+                              <box flexDirection="column" paddingLeft={1}>
+                                <box
+                                  flexDirection="row"
+                                  gap={1}
+                                  onMouseDown={() => setExpanded("knowledgeNodes", node.id, !expanded.knowledgeNodes[node.id])}
+                                >
+                                  <text fg={theme.text}>{expanded.knowledgeNodes[node.id] ? "▼" : "▶"}</text>
+                                  <text fg={theme.text}>{node.name}</text>
+                                </box>
+                                <Show when={expanded.knowledgeNodes[node.id]}>
+                                  <Show when={node.path}>
+                                    <text fg={theme.textMuted} paddingLeft={2}>
+                                      {clip(node.path, 70)}
+                                    </text>
+                                  </Show>
+                                  <For each={node.related}>
+                                    {(relation) => (
+                                      <text fg={theme.textMuted} paddingLeft={2}>
+                                        {relation.relation}
+                                        {" -> "}
+                                        {relation.targetName}
+                                      </text>
+                                    )}
+                                  </For>
+                                </Show>
+                              </box>
+                            )}
+                          </For>
+                        </Show>
+                      </box>
+                    )}
                   </For>
                 </Show>
               </box>

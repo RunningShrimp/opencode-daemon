@@ -29,11 +29,86 @@ import { batch, onMount } from "solid-js"
 import { Log } from "@/util/log"
 import type { Path } from "@opencode-ai/sdk"
 import type { Workspace } from "@opencode-ai/sdk/v2"
+import {
+  consumePreloadedSessionHistoryPage,
+  getSessionHistoryHasMore,
+  mergeSessionHistoryPage,
+  type PreloadedSessionHistoryPage,
+} from "./sync-history"
 
-const SESSION_MESSAGE_WINDOW = 100
+type KnowledgeGraphSidebarRelation = {
+  relation: string
+  targetName: string
+  targetType: string
+}
+
+type KnowledgeGraphSidebarNode = {
+  id: string
+  name: string
+  type: string
+  path?: string
+  accessCount: number
+  tags: string[]
+  related: KnowledgeGraphSidebarRelation[]
+}
+
+type KnowledgeGraphSidebarSnapshot = {
+  stats: {
+    nodeCount: number
+    edgeCount: number
+    typeBreakdown: Record<string, number>
+  }
+  relevant: KnowledgeGraphSidebarNode[]
+  groups: Array<{
+    type: string
+    count: number
+    nodes: KnowledgeGraphSidebarNode[]
+  }>
+  refreshedAt: number
+}
+
+const SESSION_MESSAGE_WINDOW = 40
+const SESSION_HISTORY_PRELOAD_PAGES = 2
+
+type SessionHistoryState = {
+  nextCursor?: string
+  hasMore: boolean
+  loading: boolean
+  preloading: boolean
+  window: number
+  preloadedPages: PreloadedSessionHistoryPage[]
+}
 
 function shouldCapSessionMessages(session?: Session) {
   return !session?.revert?.messageID
+}
+
+function textFromParts(parts: Part[]) {
+  return parts
+    .filter((part): part is Extract<Part, { type: "text" }> => part.type === "text")
+    .map((part) => part.text)
+    .join("\n")
+    .trim()
+}
+
+function lastUserQueryFromStore(messages: Message[] = [], partsByMessage: Record<string, Part[]> = {}) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.role !== "user") continue
+    const text = textFromParts(partsByMessage[message.id] ?? [])
+    if (text) return text
+  }
+  return undefined
+}
+
+function lastUserQueryFromDetailedMessages(messages: Array<{ info: Message; parts: Part[] }>) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.info.role !== "user") continue
+    const text = textFromParts(message.parts)
+    if (text) return text
+  }
+  return undefined
 }
 
 export const { use: useSync, provider: SyncProvider } = createSimpleContext({
@@ -64,6 +139,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       todo: {
         [sessionID: string]: Todo[]
       }
+      session_history: {
+        [sessionID: string]: SessionHistoryState | undefined
+      }
       message: {
         [sessionID: string]: Message[]
       }
@@ -81,6 +159,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       vcs: VcsInfo | undefined
       path: Path
       workspaceList: Workspace[]
+      knowledge_graph: {
+        [sessionID: string]: KnowledgeGraphSidebarSnapshot | undefined
+      }
     }>({
       provider_next: {
         all: [],
@@ -100,6 +181,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       session_status: {},
       session_diff: {},
       todo: {},
+      session_history: {},
       message: {},
       part: {},
       lsp: [],
@@ -109,14 +191,72 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       vcs: undefined,
       path: { state: "", config: "", worktree: "", directory: "" },
       workspaceList: [],
+      knowledge_graph: {},
     })
 
     const sdk = useSDK()
+
+    async function syncKnowledgeGraph(sessionID: string, query?: string) {
+      const session = store.session.find((item) => item.id === sessionID)
+      if (!session) return
+
+      const url = new URL("/experimental/knowledge", sdk.url)
+      const resolvedQuery = query ?? lastUserQueryFromStore(store.message[sessionID], store.part)
+      if (resolvedQuery) url.searchParams.set("query", resolvedQuery.slice(0, 240))
+
+      const response = await sdk.fetch(url, {
+        headers: {
+          "x-opencode-directory": session.directory,
+          ...(session.workspaceID ? { "x-opencode-workspace": session.workspaceID } : {}),
+        },
+      }).catch(() => undefined)
+
+      if (!response?.ok) return
+      const data = (await response.json().catch(() => undefined)) as KnowledgeGraphSidebarSnapshot | undefined
+      if (!data) return
+      setStore("knowledge_graph", sessionID, reconcile(data))
+    }
 
     async function syncWorkspaces() {
       const result = await sdk.client.experimental.workspace.list().catch(() => undefined)
       if (!result?.data) return
       setStore("workspaceList", reconcile(result.data))
+    }
+
+    async function prefetchSessionHistory(sessionID: string, input: { nextCursor: string; window: number }) {
+      let nextCursor: string | undefined = input.nextCursor
+      const preloadedPages: PreloadedSessionHistoryPage[] = []
+
+      try {
+        while (nextCursor && preloadedPages.length < SESSION_HISTORY_PRELOAD_PAGES) {
+          const response: Awaited<ReturnType<typeof sdk.client.session.messages>> | undefined = await sdk.client.session
+            .messages({
+              sessionID,
+              limit: input.window,
+              before: nextCursor,
+            })
+            .catch(() => undefined)
+
+          if (!response?.data) break
+
+          preloadedPages.push(response.data)
+          nextCursor = response.response.headers.get("x-next-cursor") ?? undefined
+        }
+      } finally {
+        setStore(
+          produce((draft) => {
+            const history = draft.session_history[sessionID]
+            if (!history) return
+            history.preloadedPages.push(...preloadedPages)
+            history.preloading = false
+            history.nextCursor = nextCursor
+            history.hasMore = getSessionHistoryHasMore({
+              preloadedPages: history.preloadedPages,
+              nextCursor: history.nextCursor,
+            })
+          }),
+        )
+      }
     }
 
     sdk.event.listen((e) => {
@@ -260,7 +400,9 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
           )
           const updated = store.message[event.properties.info.sessionID]
           const session = store.session.find((item) => item.id === event.properties.info.sessionID)
-          if (updated.length > SESSION_MESSAGE_WINDOW && shouldCapSessionMessages(session)) {
+          const history = store.session_history[event.properties.info.sessionID]
+          const messageWindow = history?.window ?? SESSION_MESSAGE_WINDOW
+          if (updated.length > messageWindow && shouldCapSessionMessages(session)) {
             const oldest = updated[0]
             batch(() => {
               setStore(
@@ -497,27 +639,121 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
 
           const session = await sdk.client.session.get({ sessionID }, { throwOnError: true })
           const messageLimit = shouldCapSessionMessages(session.data) ? SESSION_MESSAGE_WINDOW : undefined
-          const [messages, todo, diff] = await Promise.all([
-            sdk.client.session.messages({ sessionID, limit: messageLimit }),
-            sdk.client.session.todo({ sessionID }),
-            sdk.client.session.diff({ sessionID }),
-          ])
+          const messages = await sdk.client.session.messages({ sessionID, limit: messageLimit })
+          const nextCursor = messages.response.headers.get("x-next-cursor") ?? undefined
+          const todoPromise = sdk.client.session.todo({ sessionID })
+          const diffPromise = sdk.client.session.diff({ sessionID })
           setStore(
             produce((draft) => {
               const match = Binary.search(draft.session, sessionID, (s) => s.id)
               if (match.found) draft.session[match.index] = session.data!
               if (!match.found) draft.session.splice(match.index, 0, session.data!)
-              draft.todo[sessionID] = todo.data ?? []
               const msgs = messages.data ?? []
               draft.message[sessionID] = msgs.map((x) => x.info)
+              draft.session_history[sessionID] = {
+                nextCursor,
+                hasMore: !!nextCursor,
+                loading: false,
+                preloading: false,
+                window: messageLimit ?? Number.MAX_SAFE_INTEGER,
+                preloadedPages: [],
+              }
               for (const message of msgs) {
                 draft.part[message.info.id] = message.parts
               }
-              draft.session_diff[sessionID] = diff.data ?? []
             }),
           )
           fullSyncedSessions.add(sessionID)
+          if (typeof messageLimit === "number" && nextCursor) {
+            setStore("session_history", sessionID, "preloading", true)
+            void prefetchSessionHistory(sessionID, {
+              nextCursor,
+              window: messageLimit,
+            })
+          }
+          void Promise.allSettled([todoPromise, diffPromise, syncKnowledgeGraph(sessionID, lastUserQueryFromDetailedMessages(messages.data ?? []))]).then(
+            (results) => {
+              const todo = results[0].status === "fulfilled" ? results[0].value.data ?? [] : undefined
+              const diff = results[1].status === "fulfilled" ? results[1].value.data ?? [] : undefined
+              batch(() => {
+                if (todo) setStore("todo", sessionID, todo)
+                if (diff) setStore("session_diff", sessionID, diff)
+              })
+            },
+          )
         },
+        async loadMore(sessionID: string) {
+          const history = store.session_history[sessionID]
+          if (!history || history.loading || history.preloading || !history.hasMore) return
+
+          if (history.preloadedPages.length > 0) {
+            setStore(
+              produce((draft) => {
+                const currentHistory = draft.session_history[sessionID]
+                if (!currentHistory) return
+                const consumed = consumePreloadedSessionHistoryPage({
+                  existingMessages: draft.message[sessionID] ?? [],
+                  preloadedPages: currentHistory.preloadedPages,
+                  nextCursor: currentHistory.nextCursor,
+                })
+                if (!consumed) return
+                for (const [messageID, parts] of Object.entries(consumed.parts)) {
+                  draft.part[messageID] = parts
+                }
+                draft.message[sessionID] = consumed.messages
+                draft.session_history[sessionID] = {
+                  ...currentHistory,
+                  hasMore: consumed.hasMore,
+                  preloadedPages: consumed.preloadedPages,
+                }
+              }),
+            )
+            return
+          }
+
+          if (!history.nextCursor) return
+
+          setStore("session_history", sessionID, "loading", true)
+          const response = await sdk.client.session
+            .messages({
+              sessionID,
+              limit: Number.isFinite(history.window) ? history.window : SESSION_MESSAGE_WINDOW,
+              before: history.nextCursor,
+            })
+            .catch(() => undefined)
+
+          if (!response?.data) {
+            setStore("session_history", sessionID, "loading", false)
+            return
+          }
+
+          const nextCursor = response.response.headers.get("x-next-cursor") ?? undefined
+          setStore(
+            produce((draft) => {
+              const merged = mergeSessionHistoryPage({
+                existingMessages: draft.message[sessionID] ?? [],
+                incomingMessages: response.data ?? [],
+              })
+              for (const [messageID, parts] of Object.entries(merged.parts)) {
+                draft.part[messageID] = parts
+              }
+              draft.message[sessionID] = merged.messages
+              const currentHistory = draft.session_history[sessionID]
+              draft.session_history[sessionID] = {
+                nextCursor,
+                hasMore: getSessionHistoryHasMore({
+                  preloadedPages: currentHistory?.preloadedPages ?? [],
+                  nextCursor,
+                }),
+                loading: false,
+                preloading: currentHistory?.preloading ?? false,
+                window: history.window,
+                preloadedPages: currentHistory?.preloadedPages ?? [],
+              }
+            }),
+          )
+        },
+        refreshKnowledgeGraph: syncKnowledgeGraph,
       },
       workspace: {
         get(workspaceID: string) {
