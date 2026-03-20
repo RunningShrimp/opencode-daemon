@@ -2,9 +2,10 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { messageID, projectInfo, sessionID } from "../test-helpers/ids"
 
 const cleanup: string[] = []
-const envKeys = ["XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"] as const
+const envKeys = ["XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "OPENCODE_EMBEDDING_PROVIDER"] as const
 const originalEnv = new Map<string, string | undefined>()
 
 beforeEach(async () => {
@@ -15,6 +16,7 @@ beforeEach(async () => {
   process.env.XDG_CACHE_HOME = path.join(root, "cache-home")
   process.env.XDG_CONFIG_HOME = path.join(root, "config-home")
   process.env.XDG_STATE_HOME = path.join(root, "state-home")
+  process.env.OPENCODE_EMBEDDING_PROVIDER = "fallback"
 })
 
 afterEach(async () => {
@@ -47,23 +49,18 @@ describe("evidence gather tool", () => {
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: "evidence-gather-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
+      project: projectInfo("evidence-gather-project", workspace),
     })
 
     await Instance.provide({
       directory: workspace,
       fn: async () => {
-        await vectorStore.clear("evidence-gather-project")
+        const projectID = Instance.project.id
+        await vectorStore.clear(projectID)
         await vectorStore.addVectors([
           {
             id: "vec-1",
-            sessionId: "evidence-gather-project",
+            sessionId: projectID,
             path: "src/auth.ts",
             content: "export function auth() { return loadSession() }",
             embedding: await (await import("../ai/rag/embedding")).embeddingService.getEmbedding("auth session loader"),
@@ -82,8 +79,8 @@ describe("evidence gather tool", () => {
             minRelevance: 0.1,
           },
           {
-            sessionID: "session-evidence",
-            messageID: "message-evidence",
+            sessionID: sessionID("session-evidence"),
+            messageID: messageID("message-evidence"),
             agent: "build",
             abort: new AbortController().signal,
             messages: [],

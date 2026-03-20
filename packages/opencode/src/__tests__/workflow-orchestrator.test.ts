@@ -172,4 +172,20 @@ describe("WorkflowOrchestrator", () => {
     expect(afterResetB?.toolHistory.join("|")).not.toContain("apply_patch")
     expect(afterResetB?.toolFailureCount).toBeGreaterThan(0)
   })
+
+  test("initializes workflow even when the prompt text is empty", async () => {
+    const state = await WorkflowOrchestrator.initialize({
+      sessionID: "session_empty_prompt_workflow",
+      prompt: "   ",
+      intent: {
+        type: "implementation",
+        description: "Continue the requested image analysis flow",
+        complexity: "moderate",
+      },
+    })
+
+    expect(state.plan.goal).toBe("Continue the requested image analysis flow")
+    expect(state.plan.plan.goal).toBe("Continue the requested image analysis flow")
+    expect(state.plan.plan.steps.length).toBeGreaterThan(0)
+  })
 })

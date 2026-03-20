@@ -3,6 +3,61 @@ import { AgentState } from "../ai/thinking/self-monitor"
 import { ReasoningStrategy } from "../ai/thinking/metacognition"
 
 describe("SelfDrivingLoop quality gate and strategy switching", () => {
+  test("detectRemainingWork() ignores default completion-only criteria", async () => {
+    const { SelfDrivingLoop } = await import("../ai/thinking/self-driving-loop")
+    const loop = new SelfDrivingLoop()
+
+    await loop.initialize("Test task", {
+      type: "implementation",
+      description: "Test",
+      complexity: "simple",
+    })
+
+    const remaining = loop.detectRemainingWork()
+
+    expect(remaining.hasRemaining).toBe(false)
+    expect(remaining.items).toEqual([])
+    expect(remaining.suggestedActions).toEqual([])
+  })
+
+  test("detectRemainingWork() keeps actionable criteria while dropping generic completion summaries", async () => {
+    const { SelfDrivingLoop } = await import("../ai/thinking/self-driving-loop")
+    const loop = new SelfDrivingLoop()
+
+    await loop.initialize("Test task", {
+      type: "implementation",
+      description: "Test",
+      complexity: "simple",
+    })
+
+    ;(loop as any).loopState.currentGoal.successCriteria = [
+      "Fix dependency injection compile errors",
+      "All requirements met",
+    ]
+
+    const remaining = loop.detectRemainingWork()
+
+    expect(remaining.hasRemaining).toBe(true)
+    expect(remaining.items).toEqual(["Fix dependency injection compile errors"])
+    expect(remaining.suggestedActions).toEqual(["Address: Fix dependency injection compile errors"])
+  })
+
+  test("getProgress() recognizes completion semantics beyond complete/done", async () => {
+    const { SelfDrivingLoop } = await import("../ai/thinking/self-driving-loop")
+    const loop = new SelfDrivingLoop()
+
+    await loop.initialize("Test task", {
+      type: "implementation",
+      description: "Test",
+      complexity: "simple",
+    })
+
+    ;(loop as any).monitor.state.confidence = 0.9
+    ;(loop as any).loopState.currentGoal.successCriteria = ["All requirements met"]
+
+    expect(loop.getProgress()).toBe(1)
+  })
+
   test("adapt() switches to HYPOTHETICAL strategy when quality gate fails due to low progress", async () => {
     const { SelfDrivingLoop } = await import("../ai/thinking/self-driving-loop")
     const loop = new SelfDrivingLoop()

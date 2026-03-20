@@ -35,4 +35,20 @@ describe("buildStructuredTaskPlan", () => {
 
     expect(plan.clarificationQuestions.length).toBeGreaterThan(0)
   })
+
+  test("falls back to intent-derived goal when prompt text is empty", () => {
+    const plan = buildStructuredTaskPlan({
+      sessionID: "planner-empty-goal",
+      prompt: "   ",
+      intent: {
+        type: "implementation",
+        description: "Handle image-only turn planning",
+        complexity: "moderate",
+      },
+    })
+
+    expect(plan.goal).toBe("Handle image-only turn planning")
+    expect(plan.plan.goal).toBe("Handle image-only turn planning")
+    expect(validatePlan(plan.plan).valid).toBe(true)
+  })
 })

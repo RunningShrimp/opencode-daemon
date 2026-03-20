@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { projectInfo } from "../test-helpers/ids"
 
 describe("todo markdown aggregation", () => {
   const envKeys = ["XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"] as const
@@ -20,13 +21,7 @@ describe("todo markdown aggregation", () => {
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: "todo-aggregate-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
+      project: projectInfo("todo-aggregate-project", workspace),
     })
   })
 

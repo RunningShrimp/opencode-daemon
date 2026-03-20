@@ -112,7 +112,7 @@ export namespace Todo {
     return assignIDs(stored, state?.todos ?? [])
   }
 
-  export function getStored(sessionID: string) {
+  export function getStored(sessionID: SessionID) {
     const rows = Database.cachedSync(
       `todo:get:${sessionID}`,
       () =>
@@ -128,7 +128,7 @@ export namespace Todo {
     }))
   }
 
-  function persistStored(sessionID: string, todos: Info[]) {
+  function persistStored(sessionID: SessionID, todos: Info[]) {
     Database.transaction((db) => {
       db.delete(TodoTable).where(eq(TodoTable.session_id, sessionID)).run()
       if (todos.length === 0) return
@@ -167,7 +167,7 @@ export namespace Todo {
   }
 
   async function resolveTarget(
-    sessionID: string,
+    sessionID: SessionID,
     state: SyncState | undefined,
     markdownPath: string | undefined,
     messages: MessageV2.WithParts[] | undefined,
@@ -188,7 +188,7 @@ export namespace Todo {
     return { type: "sidecar", mode: "sidecar" }
   }
 
-  async function discoverMarkdownTarget(sessionID: string, messages: MessageV2.WithParts[] | undefined) {
+  async function discoverMarkdownTarget(sessionID: SessionID, messages: MessageV2.WithParts[] | undefined) {
     const candidates = collectMarkdownCandidates(messages)
     if (candidates.length === 0) return undefined
 
@@ -226,7 +226,7 @@ export namespace Todo {
   }
 
   async function readTodoWithConflictPolicy(
-    sessionID: string,
+    sessionID: SessionID,
     state: SyncState | undefined,
     messages: MessageV2.WithParts[] | undefined,
   ) {
@@ -323,13 +323,13 @@ export namespace Todo {
     }
   }
 
-  async function readSyncState(sessionID: string) {
+  async function readSyncState(sessionID: SessionID) {
     return Storage.read<SyncState>(["todo_sync", sessionID])
       .then((state) => SyncState.parse(state))
       .catch(() => undefined)
   }
 
-  async function persistSyncState(sessionID: string, state: SyncState) {
+  async function persistSyncState(sessionID: SessionID, state: SyncState) {
     await Storage.write(["todo_sync", sessionID], state)
   }
 }

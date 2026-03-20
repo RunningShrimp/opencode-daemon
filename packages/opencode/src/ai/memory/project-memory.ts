@@ -1,4 +1,5 @@
 import { Storage } from "@/storage/storage"
+import { Instance } from "@/project/instance"
 import { Log } from "@/util/log"
 import type { ClaimRecord } from "@/ai/thinking/evidence"
 import { embeddingService } from "@/ai/rag/embedding"
@@ -40,9 +41,37 @@ const embeddingCache = new Map<string, number[]>()
 const MAX_EMBEDDING_CACHE_SIZE = 500
 // Project IDs that have been explicitly cleared in tests — read() skips disk for these.
 const clearedProjects = new Set<string>()
+const bootstrapTasks = new Map<string, Promise<void>>()
 
 function embeddingKey(projectID: string) {
   return ["project_memory_embeddings", projectID]
+}
+
+async function ensureProjectMemoryBootstrapped(projectID: string) {
+  if (clearedProjects.has(projectID)) return
+  if ((cache.get(projectID)?.entries.length ?? 0) > 0) return
+  if (Instance.project?.id !== projectID) return
+
+  let task = bootstrapTasks.get(projectID)
+  if (!task) {
+    task = import("./project-memory-bootstrap")
+      .then(({ bootstrapProjectMemorySafe }) =>
+        bootstrapProjectMemorySafe({
+          projectID,
+          rootDir: Instance.project?.worktree,
+          projectName: Instance.project?.name,
+          startCommand: Instance.project?.commands?.start,
+        }),
+      )
+      .finally(() => {
+        if (bootstrapTasks.get(projectID) === task) {
+          bootstrapTasks.delete(projectID)
+        }
+      })
+    bootstrapTasks.set(projectID, task)
+  }
+
+  await task
 }
 
 export namespace ProjectMemory {
@@ -188,7 +217,13 @@ export namespace ProjectMemory {
   }
 
   export async function renderPromptContext(projectID: string, queryOrOptions?: string | RenderProjectMemoryOptions) {
-    const snapshot = await read(projectID)
+    let snapshot = await read(projectID)
+    if (snapshot.entries.length === 0) {
+      await ensureProjectMemoryBootstrapped(projectID).catch((error) => {
+        log.warn("failed to lazily bootstrap project memory", { projectID, error: String(error) })
+      })
+      snapshot = await read(projectID)
+    }
     if (snapshot.entries.length === 0) return undefined
     const options: RenderProjectMemoryOptions =
       typeof queryOrOptions === "string"

@@ -1,11 +1,14 @@
-import { ModuleLoader } from "@/util/module-loader"
 import { rankHealthyEndpoints } from "@/util/network-probe"
 import { Log } from "@/util/log"
-import { MIRRORS } from "@/util/hf-mirror"
+import { EMBEDDING_MODEL, MIRRORS } from "@/util/hf-mirror"
+import { resolveTransformersDevicePreference } from "@/util/transformers-device"
 
 const MAX_CACHE_SIZE = 10000
 const TTL_MS = 24 * 60 * 60 * 1000
 const DEFAULT_DIMENSIONS = 512
+const DEFAULT_TEXT_EMBEDDING_MODEL = "onnx-community/Qwen3-Embedding-0.6B-ONNX"
+const DEFAULT_IMAGE_EMBEDDING_MODEL = "onnx-community/clip-vit-base-patch32"
+const TRANSFORMERS_REMOTE_PATH_TEMPLATE = "{model}/resolve/{revision}/"
 
 const log = Log.create({ service: "embedding" })
 
@@ -118,6 +121,84 @@ function normalizeInput(input: string | EmbeddingInput): EmbeddingInput {
     ...input,
     modality: input.modality ?? "text",
   }
+}
+
+function normalizeConfiguredValue(value: string | undefined | null) {
+  if (typeof value !== "string") return undefined
+  const trimmed = value.trim()
+  return trimmed || undefined
+}
+
+function isBlockedLegacyEmbeddingModel(model: string) {
+  const normalized = model.trim().toLowerCase()
+  return normalized.includes("all-minilm-l6-v2")
+}
+
+function isLegacyMiniLMResolutionError(error: unknown) {
+  const normalized = String(error).trim().toLowerCase()
+  if (!normalized) return false
+  return normalized.includes("xenova/all-minilm-l6-v2") || normalized.includes("all-minilm-l6-v2")
+}
+
+function resolveSafeEmbeddingModel(
+  configuredModel: string | undefined,
+  fallbackModel: string,
+  modelType: "text" | "image",
+) {
+  if (!configuredModel) return fallbackModel
+  if (!isBlockedLegacyEmbeddingModel(configuredModel)) return configuredModel
+
+  log.warn("blocked legacy embedding model override, using safe default", {
+    modelType,
+    configuredModel,
+    fallbackModel,
+  })
+  return fallbackModel
+}
+
+function ensureTrailingSlash(value: string) {
+  return value.endsWith("/") ? value : `${value}/`
+}
+
+function resolveTransformersTextModel() {
+  const configuredModel = (
+    normalizeConfiguredValue(process.env.OPENCODE_EMBEDDING_TEXT_MODEL) ??
+    normalizeConfiguredValue(process.env.OPENCODE_EMBEDDING_MODEL) ??
+    normalizeConfiguredValue(EMBEDDING_MODEL) ??
+    DEFAULT_TEXT_EMBEDDING_MODEL
+  )
+  return resolveSafeEmbeddingModel(configuredModel, DEFAULT_TEXT_EMBEDDING_MODEL, "text")
+}
+
+function resolveTransformersImageModel() {
+  const configuredModel = normalizeConfiguredValue(process.env.OPENCODE_EMBEDDING_IMAGE_MODEL) ?? DEFAULT_IMAGE_EMBEDDING_MODEL
+  return resolveSafeEmbeddingModel(configuredModel, DEFAULT_IMAGE_EMBEDDING_MODEL, "image")
+}
+
+function resolveTransformersRemoteHost() {
+  return ensureTrailingSlash(
+    normalizeConfiguredValue(process.env.HF_ENDPOINT) ??
+      normalizeConfiguredValue(process.env.HF_HUB_URL) ??
+      MIRRORS.huggingface,
+  )
+}
+
+function resolveTransformersRemoteHosts() {
+  const candidates = [
+    resolveTransformersRemoteHost(),
+    ensureTrailingSlash(MIRRORS["hf-mirror"]),
+    ensureTrailingSlash(MIRRORS.huggingface),
+  ]
+
+  const seen = new Set<string>()
+  const unique: string[] = []
+  for (const value of candidates) {
+    if (seen.has(value)) continue
+    seen.add(value)
+    unique.push(value)
+  }
+
+  return unique
 }
 
 function toTextContent(input: EmbeddingInput): string {
@@ -267,9 +348,13 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
   kind = "transformers" as const
   private initialized = false
   private textPipeline: any
-  private imagePipeline: any
-  private readonly textModel = process.env.OPENCODE_EMBEDDING_TEXT_MODEL ?? "Xenova/paraphrase-multilingual-MiniLM-L12-v2"
-  private readonly imageModel = process.env.OPENCODE_EMBEDDING_IMAGE_MODEL ?? "Xenova/clip-vit-base-patch32"
+  private imagePipeline?: any
+  private readonly textModel = resolveTransformersTextModel()
+  private readonly imageModel = resolveTransformersImageModel()
+  private readonly textPooling = /qwen3-embedding/i.test(this.textModel) ? "last_token" : "mean"
+  private readonly pipelineOptions: Record<string, unknown> = {
+    quantized: true,
+  }
 
   supports() {
     return true
@@ -279,29 +364,76 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
     if (this.initialized) return
 
     await rankHealthyEndpoints([MIRRORS.modelscope, MIRRORS["hf-mirror"], MIRRORS.huggingface], 2000).catch(() => [])
-    const loader = ModuleLoader.getInstance()
-    const installed = await loader.install({
-      name: "@xenova/transformers",
-      version: "latest",
-      type: "wasm",
-    })
-    if (!installed) {
-      throw new Error("Failed to install @xenova/transformers")
-    }
-
-    const transformers = await loader.load<any>("@xenova/transformers")
+    const transformers = await import("@huggingface/transformers")
     const { pipeline, env } = transformers
+    const remoteHosts = resolveTransformersRemoteHosts()
     if (env) {
       env.allowRemoteModels = true
       env.allowLocalModels = true
+      env.remotePathTemplate = TRANSFORMERS_REMOTE_PATH_TEMPLATE
     }
 
-    this.textPipeline = await pipeline("feature-extraction", this.textModel, {
-      quantized: true,
+    const devicePreference = await resolveTransformersDevicePreference()
+    if (devicePreference.device === "webgpu") {
+      this.pipelineOptions.device = "webgpu"
+    }
+    log.info("transformers device resolved", {
+      device: devicePreference.device ?? "wasm",
+      reason: devicePreference.reason,
+      runtimeWebGPU: devicePreference.hasRuntimeWebGPU,
+      systemGPU: devicePreference.hasSystemGPU,
+      evidence: devicePreference.evidence,
     })
-    this.imagePipeline = await pipeline("image-feature-extraction", this.imageModel, {
-      quantized: true,
-    })
+
+    let lastTextError: unknown
+    for (const remoteHost of remoteHosts) {
+      if (env) {
+        env.remoteHost = remoteHost
+      }
+
+      try {
+        this.textPipeline = await pipeline("feature-extraction", this.textModel, {
+          ...this.pipelineOptions,
+        })
+        break
+      } catch (error) {
+        if (isLegacyMiniLMResolutionError(error)) {
+          lastTextError = new Error(
+            "Detected legacy MiniLM dependency path during transformers initialization; aborting retries and falling back.",
+          )
+          log.warn("transformers text model init hit legacy MiniLM dependency path", {
+            model: this.textModel,
+            remoteHost,
+            error: String(error),
+          })
+          break
+        }
+
+        lastTextError = error
+        log.warn("transformers text model init failed", {
+          model: this.textModel,
+          remoteHost,
+          error: String(error),
+        })
+      }
+    }
+
+    if (!this.textPipeline) {
+      throw (lastTextError ?? new Error("Transformers text pipeline init failed"))
+    }
+
+    try {
+      this.imagePipeline = await pipeline("image-feature-extraction", this.imageModel, {
+        ...this.pipelineOptions,
+      })
+    } catch (error) {
+      this.imagePipeline = undefined
+      log.warn("transformers image model init failed, continuing with text-only embeddings", {
+        model: this.imageModel,
+        error: String(error),
+      })
+    }
+
     this.initialized = true
   }
 
@@ -311,15 +443,24 @@ export class TransformersEmbeddingProvider implements EmbeddingProvider {
     }
 
     if (input.modality === "image") {
-      const output = await this.imagePipeline(input.content, {
-        pooling: "mean",
+      if (this.imagePipeline) {
+        const output = await this.imagePipeline(input.content, {
+          pooling: "mean",
+          normalize: true,
+        })
+        return extractEmbeddingArray(output)
+      }
+
+      const fallbackText = `${input.path ?? "image"} ${JSON.stringify(input.metadata ?? {})}`.trim() || "image"
+      const output = await this.textPipeline(fallbackText, {
+        pooling: this.textPooling,
         normalize: true,
       })
       return extractEmbeddingArray(output)
     }
 
     const output = await this.textPipeline(toTextContent(input), {
-      pooling: "mean",
+      pooling: this.textPooling,
       normalize: true,
     })
     return extractEmbeddingArray(output)

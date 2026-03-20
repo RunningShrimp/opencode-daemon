@@ -25,17 +25,34 @@ const MAX_BYTES = 50 * 1024
 const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
 const MAX_TREE_SITTER_HINT_BYTES = 256 * 1024
 
+type SyntaxHintMetadata = {
+  range: string
+  nodeType: string
+  syntaxSummary: string
+  syntaxHint: string
+}
+
+type ReadMetadata = {
+  preview: string
+  truncated: boolean
+  loaded: string[]
+  hashlineRange?: string
+  syntaxHints?: SyntaxHintMetadata[]
+}
+
+const ReadParameters = z.object({
+  filePath: z.string().describe("The absolute path to the file or directory to read"),
+  offset: z.coerce.number().describe("The line number to start reading from (1-indexed)").optional(),
+  limit: z.coerce.number().describe("The maximum number of lines to read (defaults to 2000)").optional(),
+})
+
 function formatHashlineRange(startLine: number, startContent: string, endLine: number, endContent: string) {
   return `${startLine}#${computeLineHash(startLine, startContent)}-${endLine}#${computeLineHash(endLine, endContent)}`
 }
 
-export const ReadTool = Tool.define("read", {
+export const ReadTool = Tool.define<typeof ReadParameters, ReadMetadata>("read", {
   description: DESCRIPTION,
-  parameters: z.object({
-    filePath: z.string().describe("The absolute path to the file or directory to read"),
-    offset: z.coerce.number().describe("The line number to start reading from (1-indexed)").optional(),
-    limit: z.coerce.number().describe("The maximum number of lines to read (defaults to 2000)").optional(),
-  }),
+  parameters: ReadParameters,
   async execute(params, ctx) {
     if (params.offset !== undefined && params.offset < 1) {
       throw new Error("offset must be greater than or equal to 1")
@@ -216,7 +233,7 @@ export const ReadTool = Tool.define("read", {
     const hashlineRange =
       raw.length > 0 ? formatHashlineRange(offset, raw[0], lastReadLine, raw[raw.length - 1]) : undefined
 
-    let syntaxHints: Array<{ range: string; nodeType: string; syntaxSummary: string; syntaxHint: string }> = []
+    let syntaxHints: SyntaxHintMetadata[] = []
     if (
       raw.length > 0 &&
       Number(stat.size) <= MAX_TREE_SITTER_HINT_BYTES &&

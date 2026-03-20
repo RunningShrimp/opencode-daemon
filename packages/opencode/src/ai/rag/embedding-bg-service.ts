@@ -13,6 +13,8 @@ import path from "node:path"
 import { existsSync, mkdirSync } from "node:fs"
 
 const log = Log.create({ service: "embedding-bg" })
+const DEFAULT_PROVIDER_BOOT_TIMEOUT_MS = 5_000
+let embeddingBackgroundServiceRegistered = false
 
 class InMemoryVectorCache {
   private cache: Map<string, number[]> = new Map()
@@ -55,7 +57,19 @@ type EmbeddingBootstrapConfig =
   | { mode: "external"; source: "env"; targetProvider: "openai" | "cohere" | "voyage"; config: ExternalEmbeddingConfig }
 
 function shouldUseFallbackEmbeddingByDefault() {
-  return typeof Bun !== "undefined"
+  return false
+}
+
+function resolveEmbeddingBootTimeoutMs() {
+  const raw = process.env.OPENCODE_EMBEDDING_BOOT_TIMEOUT_MS?.trim()
+  if (!raw) return DEFAULT_PROVIDER_BOOT_TIMEOUT_MS
+
+  const timeoutMs = Number.parseInt(raw, 10)
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error(`Invalid OPENCODE_EMBEDDING_BOOT_TIMEOUT_MS: ${raw}`)
+  }
+
+  return timeoutMs
 }
 
 function resolveEmbeddingBootstrapConfig(): EmbeddingBootstrapConfig {
@@ -171,6 +185,8 @@ export class EmbeddingBackgroundService implements IBackgroundService {
   private reindexCallbacks: Array<() => void | Promise<void>> = []
   private isReindexing = false
   private providerInit?: Promise<void>
+  private providerBooting = false
+  private providerBootID = 0
   private providerTarget = "transformers"
   private providerSource: "env" | "default" = "default"
   private initError?: string
@@ -184,13 +200,19 @@ export class EmbeddingBackgroundService implements IBackgroundService {
     }
 
     this.status = "fallback"
-    this.providerInit = this.initializeProvider().catch((error) => {
-      this.status = "fallback"
-      this.initError = String(error)
-      embeddingService.reportProviderFailure(this.initError)
-      embeddingService.useFallback()
-      log.warn("real embedding provider init failed, staying on fallback", { error: String(error) })
-    })
+    this.providerBooting = true
+    const bootID = ++this.providerBootID
+    this.providerInit = this.runProviderBoot(bootID)
+      .catch((error) => {
+        this.status = "fallback"
+        this.initError = String(error)
+        embeddingService.reportProviderFailure(this.initError)
+        embeddingService.useFallback()
+        log.warn("real embedding provider init failed, staying on fallback", { error: String(error) })
+      })
+      .finally(() => {
+        this.providerBooting = false
+      })
     log.info("embedding service ready (semantic fallback active, provider booting)", {
       targetProvider: this.providerTarget,
       source: this.providerSource,
@@ -212,13 +234,21 @@ export class EmbeddingBackgroundService implements IBackgroundService {
    * Resolves true if ready within timeout, false if timed-out on fallback.
    */
   async waitForProvider(timeoutMs = 3000): Promise<boolean> {
-    if (this.status === "ready") return true
+    if (this.hasReadyProvider()) return true
+    if (!this.providerBooting || this.providerTarget === "fallback") return false
+
     return new Promise<boolean>((resolve) => {
       const deadline = Date.now() + timeoutMs
       const check = setInterval(() => {
-        if (this.status === "ready" || Date.now() >= deadline) {
+        if (this.hasReadyProvider()) {
           clearInterval(check)
-          resolve(this.status === "ready")
+          resolve(true)
+          return
+        }
+
+        if (!this.providerBooting || this.providerTarget === "fallback" || Date.now() >= deadline) {
+          clearInterval(check)
+          resolve(false)
         }
       }, 100)
     })
@@ -255,6 +285,31 @@ export class EmbeddingBackgroundService implements IBackgroundService {
       log.warn("embedding failed, using semantic fallback", { error: String(error) })
       return this.generateHashEmbedding(text)
     }
+  }
+
+  private hasReadyProvider(): boolean {
+    return this.status === "ready" && embeddingService.getRuntimeState().mode === "provider"
+  }
+
+  private isCurrentBoot(bootID: number) {
+    return this.providerBootID === bootID
+  }
+
+  private async runProviderBoot(bootID: number) {
+    const timeoutMs = resolveEmbeddingBootTimeoutMs()
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.isCurrentBoot(bootID)) {
+          this.providerBootID += 1
+          reject(new Error(`Embedding provider boot timed out after ${timeoutMs}ms`))
+        }
+      }, timeoutMs)
+
+      this.initializeProvider(bootID)
+        .then(() => resolve())
+        .catch(reject)
+        .finally(() => clearTimeout(timer))
+    })
   }
 
   private generateHashEmbedding(text: string): number[] {
@@ -298,8 +353,10 @@ export class EmbeddingBackgroundService implements IBackgroundService {
     }
   }
 
-  private async initializeProvider() {
+  private async initializeProvider(bootID: number) {
     const setup = resolveEmbeddingBootstrapConfig()
+    if (!this.isCurrentBoot(bootID)) return
+
     this.providerTarget = setup.targetProvider
     this.providerSource = setup.source
 
@@ -315,6 +372,7 @@ export class EmbeddingBackgroundService implements IBackgroundService {
 
     if (setup.mode === "external") {
       await embeddingService.configureFromSettings(setup.config)
+      if (!this.isCurrentBoot(bootID)) return
       this.status = "ready"
       this.initError = undefined
       log.info("embedding provider activated", {
@@ -327,6 +385,7 @@ export class EmbeddingBackgroundService implements IBackgroundService {
 
     const provider = new TransformersEmbeddingProvider()
     await embeddingService.configureProvider(provider)
+    if (!this.isCurrentBoot(bootID)) return
     this.status = "ready"
     this.initError = undefined
     log.info("embedding provider activated", {
@@ -366,6 +425,16 @@ export class EmbeddingBackgroundService implements IBackgroundService {
 export const embeddingBackgroundService = new EmbeddingBackgroundService()
 
 export function initEmbeddingBackgroundService(): void {
+  if (embeddingBackgroundServiceRegistered) return
   const manager = BackgroundServiceManager.getInstance()
   manager.register(embeddingBackgroundService)
+  embeddingBackgroundServiceRegistered = true
+}
+
+export async function ensureEmbeddingBackgroundServiceStarted(): Promise<void> {
+  initEmbeddingBackgroundService()
+  const manager = BackgroundServiceManager.getInstance()
+  const status = manager.getServiceStatus(embeddingBackgroundService.name)
+  if (status === "ready" || status === "loading" || status === "fallback") return
+  await manager.startService(embeddingBackgroundService.name)
 }

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { projectInfo } from "../test-helpers/ids"
 
 const cleanup: string[] = []
 const envKeys = ["XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"] as const
@@ -45,13 +46,7 @@ describe("derived knowledge graph — internal symbols and call edges", () => {
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: "derived-symbols-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
+      project: projectInfo("derived-symbols-project", workspace),
     })
 
     let graph: any

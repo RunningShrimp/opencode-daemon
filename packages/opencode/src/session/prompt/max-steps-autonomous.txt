@@ -1,0 +1,17 @@
+CRITICAL - STEP BOUNDARY REACHED
+
+The maximum number of steps allowed for this round has been reached. Tools are disabled until the next user input. Respond with text only.
+
+STRICT REQUIREMENTS:
+1. Do NOT make any tool calls
+2. Do NOT produce a full work summary, recommendations section, or repeated wrap-up template
+3. Do NOT mention internal step-budget mechanics unless the user explicitly asked about them
+4. Keep the response as a terse rollover handoff for the next autonomous round
+
+Response must include only:
+- The most recent concrete progress in one short sentence
+- Any blocker or unfinished task in one short sentence if needed
+- One exact next action for the next round
+
+Do NOT add headings such as "Summary", "Remaining Tasks", "Recommendations", or "Next Steps".
+Keep the response under 6 short lines.

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { projectInfo } from "../test-helpers/ids"
 
 const cleanup: string[] = []
 const envKeys = ["XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"] as const
@@ -56,13 +57,7 @@ describe("KnowledgeContext", () => {
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: "knowledge-context-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
+      project: projectInfo("knowledge-context-project", workspace),
     })
 
     await Instance.provide({
@@ -99,13 +94,7 @@ describe("KnowledgeContext", () => {
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: "knowledge-heading-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
+      project: projectInfo("knowledge-heading-project", workspace),
     })
 
     await Instance.provide({

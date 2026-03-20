@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import {
+  projectInfo,
+  projectID as makeProjectID,
+  sessionID as makeSessionID,
+  workspaceID as makeWorkspaceID,
+} from "../test-helpers/ids"
 
 const cleanup: string[] = []
 const envKeys = ["XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"] as const
@@ -46,19 +52,16 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
     const { WorkspaceTable } = await import("../control-plane/workspace.sql")
 
     const now = Date.now()
-    const projectID = "xp-ranking-proj"
-    const sessionID = "ses_xp_ranking"
+    const projectID = makeProjectID("xp-ranking-proj")
+    const sessionID = makeSessionID("ses_xp_ranking")
+    const currentWorkspaceID = makeWorkspaceID("ws-current")
+    const authWorkspaceID = makeWorkspaceID("ws-auth")
+    const graphicsWorkspaceID = makeWorkspaceID("ws-graphics")
 
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: projectID,
-        worktree: workspace,
-        vcs: "git",
-        time: { created: now, updated: now },
-        sandboxes: [],
-      },
+      project: projectInfo("xp-ranking-proj", workspace, { time: { created: now, updated: now } }),
     })
 
     await Instance.provide({
@@ -81,9 +84,9 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
 
           db.insert(WorkspaceTable)
             .values([
-              { id: "ws-current", project_id: projectID, type: "worktree", name: "Current", branch: "feature/auth", directory: workspace },
-              { id: "ws-auth", project_id: projectID, type: "worktree", name: "Auth Fix", branch: "fix/auth-token", directory: path.join(workspace, "auth-fix") },
-              { id: "ws-graphics", project_id: projectID, type: "worktree", name: "Graphics", branch: "feature/shader", directory: path.join(workspace, "graphics") },
+              { id: currentWorkspaceID, project_id: projectID, type: "worktree", name: "Current", branch: "feature/auth", directory: workspace },
+              { id: authWorkspaceID, project_id: projectID, type: "worktree", name: "Auth Fix", branch: "fix/auth-token", directory: path.join(workspace, "auth-fix") },
+              { id: graphicsWorkspaceID, project_id: projectID, type: "worktree", name: "Graphics", branch: "feature/shader", directory: path.join(workspace, "graphics") },
             ])
             .onConflictDoNothing()
             .run()
@@ -92,7 +95,7 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
             .values({
               id: sessionID,
               project_id: projectID,
-              workspace_id: "ws-current",
+              workspace_id: currentWorkspaceID,
               slug: "auth-regression-session",
               directory: workspace,
               title: "Investigate auth token regression",
@@ -157,19 +160,17 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
     const { WorkspaceTable } = await import("../control-plane/workspace.sql")
 
     const now = Date.now()
-    const projectID = "xp-multisignal-proj"
-    const sessionID = "ses_xp_multisignal"
+    const projectID = makeProjectID("xp-multisignal-proj")
+    const sessionID = makeSessionID("ses_xp_multisignal")
+    const currentWorkspaceID = makeWorkspaceID("ws-current-ms")
+    const uiWorkspaceID = makeWorkspaceID("ws-ui-ms")
+    const distractorWorkspaceID = makeWorkspaceID("ws-distractor-ms")
+    const uiSessionID = makeSessionID("ses-ms-ui-topic")
 
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: projectID,
-        worktree: workspace,
-        vcs: "git",
-        time: { created: now, updated: now },
-        sandboxes: [],
-      },
+      project: projectInfo("xp-multisignal-proj", workspace, { time: { created: now, updated: now } }),
     })
 
     await Instance.provide({
@@ -192,9 +193,9 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
 
           db.insert(WorkspaceTable)
             .values([
-              { id: "ws-current-ms", project_id: projectID, type: "worktree", name: "Current", branch: "feature/auth", directory: workspace },
-              { id: "ws-ui-ms", project_id: projectID, type: "worktree", name: "UI Lab", branch: "ui-auth-hooks", directory: uiWorkspace },
-              { id: "ws-distractor-ms", project_id: projectID, type: "worktree", name: "Auth Token Regression War Room", branch: "auth-token-regression", directory: distractorWorkspace },
+              { id: currentWorkspaceID, project_id: projectID, type: "worktree", name: "Current", branch: "feature/auth", directory: workspace },
+              { id: uiWorkspaceID, project_id: projectID, type: "worktree", name: "UI Lab", branch: "ui-auth-hooks", directory: uiWorkspace },
+              { id: distractorWorkspaceID, project_id: projectID, type: "worktree", name: "Auth Token Regression War Room", branch: "auth-token-regression", directory: distractorWorkspace },
             ])
             .onConflictDoNothing()
             .run()
@@ -204,7 +205,7 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
               {
                 id: sessionID,
                 project_id: projectID,
-                workspace_id: "ws-current-ms",
+                workspace_id: currentWorkspaceID,
                 slug: "auth-regression-react-hooks",
                 directory: workspace,
                 title: "Investigate auth token regression in react hooks",
@@ -213,9 +214,9 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
                 time_updated: now,
               },
               {
-                id: "ses-ms-ui-topic",
+                id: uiSessionID,
                 project_id: projectID,
-                workspace_id: "ws-ui-ms",
+                workspace_id: uiWorkspaceID,
                 slug: "react-hooks-auth-refactor",
                 directory: uiWorkspace,
                 title: "React hook migration for auth provider",
@@ -262,19 +263,18 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
     const { WorkspaceTable } = await import("../control-plane/workspace.sql")
 
     const now = Date.now()
-    const projectID = "xp-semantic-proj"
-    const sessionID = "ses_xp_semantic"
+    const projectID = makeProjectID("xp-semantic-proj")
+    const sessionID = makeSessionID("ses_xp_semantic")
+    const currentWorkspaceID = makeWorkspaceID("ws-current-sem")
+    const identityWorkspaceID = makeWorkspaceID("ws-identity-sem")
+    const graphicsWorkspaceID = makeWorkspaceID("ws-graphics-sem")
+    const identitySessionID = makeSessionID("ses-sem-identity")
+    const graphicsSessionID = makeSessionID("ses-sem-graphics")
 
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: projectID,
-        worktree: workspace,
-        vcs: "git",
-        time: { created: now, updated: now },
-        sandboxes: [],
-      },
+      project: projectInfo("xp-semantic-proj", workspace, { time: { created: now, updated: now } }),
     })
 
     await Instance.provide({
@@ -297,9 +297,9 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
 
           db.insert(WorkspaceTable)
             .values([
-              { id: "ws-current-sem", project_id: projectID, type: "worktree", name: "Current", branch: "feature/login-fix", directory: workspace },
-              { id: "ws-identity-sem", project_id: projectID, type: "worktree", name: "Identity Platform", branch: "identity-renewal", directory: identityWorkspace },
-              { id: "ws-graphics-sem", project_id: projectID, type: "worktree", name: "Graphics Playground", branch: "shader-tuning", directory: graphicsWorkspace },
+              { id: currentWorkspaceID, project_id: projectID, type: "worktree", name: "Current", branch: "feature/login-fix", directory: workspace },
+              { id: identityWorkspaceID, project_id: projectID, type: "worktree", name: "Identity Platform", branch: "identity-renewal", directory: identityWorkspace },
+              { id: graphicsWorkspaceID, project_id: projectID, type: "worktree", name: "Graphics Playground", branch: "shader-tuning", directory: graphicsWorkspace },
             ])
             .onConflictDoNothing()
             .run()
@@ -309,7 +309,7 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
               {
                 id: sessionID,
                 project_id: projectID,
-                workspace_id: "ws-current-sem",
+                workspace_id: currentWorkspaceID,
                 slug: "login-outage-investigation",
                 directory: workspace,
                 title: "Investigate login outage",
@@ -318,9 +318,9 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
                 time_updated: now,
               },
               {
-                id: "ses-sem-identity",
+                id: identitySessionID,
                 project_id: projectID,
-                workspace_id: "ws-identity-sem",
+                workspace_id: identityWorkspaceID,
                 slug: "authentication-credential-renewal",
                 directory: identityWorkspace,
                 title: "Authentication credential renewal rollout",
@@ -329,9 +329,9 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
                 time_updated: now - 500,
               },
               {
-                id: "ses-sem-graphics",
+                id: graphicsSessionID,
                 project_id: projectID,
-                workspace_id: "ws-graphics-sem",
+                workspace_id: graphicsWorkspaceID,
                 slug: "shader-benchmark",
                 directory: graphicsWorkspace,
                 title: "Tune shader benchmark throughput",
@@ -379,19 +379,17 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
     const { WorkspaceTable } = await import("../control-plane/workspace.sql")
 
     const now = Date.now()
-    const projectID = "xp-theme-proj"
-    const sessionID = "ses_xp_theme"
+    const projectID = makeProjectID("xp-theme-proj")
+    const sessionID = makeSessionID("ses_xp_theme")
+    const currentWorkspaceID = makeWorkspaceID("ws-current-theme")
+    const workspaceAID = makeWorkspaceID("ws-a-theme")
+    const workspaceBID = makeWorkspaceID("ws-b-theme")
+    const workspaceBSessionID = makeSessionID("ses-theme-b-match")
 
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: projectID,
-        worktree: workspace,
-        vcs: "git",
-        time: { created: now, updated: now },
-        sandboxes: [],
-      },
+      project: projectInfo("xp-theme-proj", workspace, { time: { created: now, updated: now } }),
     })
 
     await Instance.provide({
@@ -414,9 +412,9 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
 
           db.insert(WorkspaceTable)
             .values([
-              { id: "ws-current-theme", project_id: projectID, type: "worktree", name: "Current", branch: "auth-token", directory: workspace },
-              { id: "ws-a-theme", project_id: projectID, type: "worktree", name: "Auth Token Sandbox", branch: "auth-token-a", directory: workspaceA },
-              { id: "ws-b-theme", project_id: projectID, type: "worktree", name: "Auth Token Sandbox", branch: "auth-token-b", directory: workspaceB },
+              { id: currentWorkspaceID, project_id: projectID, type: "worktree", name: "Current", branch: "auth-token", directory: workspace },
+              { id: workspaceAID, project_id: projectID, type: "worktree", name: "Auth Token Sandbox", branch: "auth-token-a", directory: workspaceA },
+              { id: workspaceBID, project_id: projectID, type: "worktree", name: "Auth Token Sandbox", branch: "auth-token-b", directory: workspaceB },
             ])
             .onConflictDoNothing()
             .run()
@@ -426,7 +424,7 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
               {
                 id: sessionID,
                 project_id: projectID,
-                workspace_id: "ws-current-theme",
+                workspace_id: currentWorkspaceID,
                 slug: "auth-token-regression",
                 directory: workspace,
                 title: "Investigate auth token regression",
@@ -435,9 +433,9 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
                 time_updated: now,
               },
               {
-                id: "ses-theme-b-match",
+                id: workspaceBSessionID,
                 project_id: projectID,
-                workspace_id: "ws-b-theme",
+                workspace_id: workspaceBID,
                 slug: "auth-token-regression-fix",
                 directory: workspaceB,
                 title: "Fix auth token regression with session replay",
@@ -473,16 +471,12 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
     cleanup.push(workspace)
 
     const { Instance } = await import("../project/instance")
+    const projectID = makeProjectID("xp-intel-project")
+    const sessionID = makeSessionID("ses_xp_intel_absent")
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: "xp-intel-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
+      project: projectInfo("xp-intel-project", workspace),
     })
 
     await Instance.provide({
@@ -490,8 +484,8 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
       fn: async () => {
         const { WorkspaceIntelligence } = await import("../ai/workspace-intelligence")
         const result = await WorkspaceIntelligence.renderPromptContext({
-          sessionID: "ses_xp_intel_absent",
-          projectID: "xp-intel-project",
+          sessionID,
+          projectID,
           rootDir: workspace,
         })
         // No sessions, no workspaces, no other projects → no context
@@ -512,20 +506,15 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
     const { ProjectMemory } = await import("../ai/memory/project-memory")
 
     const now = Date.now()
-    const currentProjectId = "xp-current-proj"
-    const otherProjectId = "xp-other-proj"
-    const sessionID = "ses_xp_intel_test"
+    const currentProjectId = makeProjectID("xp-current-proj")
+    const otherProjectId = makeProjectID("xp-other-proj")
+    const sessionID = makeSessionID("ses_xp_intel_test")
+    const workspaceID = makeWorkspaceID("ws-1")
 
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: currentProjectId,
-        worktree: workspace,
-        vcs: "git",
-        time: { created: now, updated: now },
-        sandboxes: [],
-      },
+      project: projectInfo("xp-current-proj", workspace, { time: { created: now, updated: now } }),
     })
 
     await Instance.provide({
@@ -551,12 +540,12 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
             .run()
 
           db.insert(WorkspaceTable)
-            .values({ id: "ws-1", project_id: currentProjectId, type: "worktree", directory: workspace })
+            .values({ id: workspaceID, project_id: currentProjectId, type: "worktree", directory: workspace })
             .onConflictDoNothing()
             .run()
 
           db.insert(SessionTable)
-            .values({ id: sessionID, project_id: currentProjectId, workspace_id: "ws-1", slug: "xp-test", directory: workspace, title: "Test session", version: "test", time_created: now, time_updated: now })
+            .values({ id: sessionID, project_id: currentProjectId, workspace_id: workspaceID, slug: "xp-test", directory: workspace, title: "Test session", version: "test", time_created: now, time_updated: now })
             .onConflictDoNothing()
             .run()
         })
@@ -587,16 +576,11 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
     cleanup.push(workspace)
 
     const { Instance } = await import("../project/instance")
+    const projectID = makeProjectID("xp-kg-proj")
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: "xp-kg-proj",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
+      project: projectInfo("xp-kg-proj", workspace),
     })
 
     await Instance.provide({
@@ -609,9 +593,10 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
         const { WorkspaceTable } = await import("../control-plane/workspace.sql")
 
         const now = Date.now()
-        const currentProject = "xp-kg-proj"
-        const otherProject = "xp-kg-other"
-        const sessionID = "ses_xp_kg_test"
+        const currentProject = projectID
+        const otherProject = makeProjectID("xp-kg-other")
+        const sessionID = makeSessionID("ses_xp_kg_test")
+        const workspaceID = makeWorkspaceID("ws-kg-1")
 
         // Write a synthetic KG backup file for the other project
         const kgDir = path.join(Global.Path.data, "knowledge-graph")
@@ -635,11 +620,11 @@ describe("workspace intelligence — cross-project memory and KG context", () =>
             .onConflictDoNothing()
             .run()
           db.insert(WorkspaceTable)
-            .values({ id: "ws-kg-1", project_id: currentProject, type: "worktree", directory: workspace })
+            .values({ id: workspaceID, project_id: currentProject, type: "worktree", directory: workspace })
             .onConflictDoNothing()
             .run()
           db.insert(SessionTable)
-            .values({ id: sessionID, project_id: currentProject, workspace_id: "ws-kg-1", slug: "xp-kg-test", directory: workspace, title: "KG Test Session", version: "test", time_created: now, time_updated: now })
+            .values({ id: sessionID, project_id: currentProject, workspace_id: workspaceID, slug: "xp-kg-test", directory: workspace, title: "KG Test Session", version: "test", time_created: now, time_updated: now })
             .onConflictDoNothing()
             .run()
         })

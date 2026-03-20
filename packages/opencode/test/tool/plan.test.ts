@@ -7,11 +7,12 @@ import { Provider } from "../../src/provider/provider"
 import * as QuestionModule from "../../src/question"
 import { MessageV2 } from "../../src/session/message-v2"
 import { Session } from "../../src/session"
+import { messageID, modelID, projectInfo, providerID, sessionID } from "../../src/test-helpers/ids"
 import { PlanExitTool } from "../../src/tool/plan"
 
 const ctx = {
-  sessionID: "session_test_plan_exit",
-  messageID: "message_test_plan_exit",
+  sessionID: sessionID("session_test_plan_exit"),
+  messageID: messageID("message_test_plan_exit"),
   callID: "call_test_plan_exit",
   agent: "plan",
   abort: AbortSignal.any([]),
@@ -40,8 +41,11 @@ describe("tool.plan_exit", () => {
     updateMessageSpy = spyOn(Session, "updateMessage").mockResolvedValue(undefined as never)
     updatePartSpy = spyOn(Session, "updatePart").mockResolvedValue(undefined as never)
     questionSpy = spyOn(QuestionModule.Question, "ask").mockResolvedValue([["Yes"]])
-    defaultModelSpy = spyOn(Provider, "defaultModel").mockResolvedValue({ providerID: "test", modelID: "model" })
-    streamSpy = spyOn(MessageV2, "stream").mockImplementation(async function* () {})
+    defaultModelSpy = spyOn(Provider, "defaultModel").mockResolvedValue({
+      providerID: providerID("test"),
+      modelID: modelID("model"),
+    })
+    streamSpy = spyOn(MessageV2, "stream").mockImplementation((async function* () {}) as any)
   })
 
   afterEach(async () => {
@@ -61,13 +65,14 @@ describe("tool.plan_exit", () => {
     const result = await Instance.provide({
       directory: root,
       worktree: root,
-      project: { id: "project_test_plan", worktree: root } as any,
+      project: projectInfo("project_test_plan", root),
       fn: () =>
         tool.execute(
           {
             autoApprove: true,
             summary: "Plan file finalized and ready for execution.",
             satisfiedCriteria: ["Implementation steps are written", "Verification steps are included"],
+            remainingQuestions: [],
           },
           ctx,
         ),
@@ -87,11 +92,12 @@ describe("tool.plan_exit", () => {
       Instance.provide({
         directory: root,
         worktree: root,
-        project: { id: "project_test_plan", worktree: root } as any,
+        project: projectInfo("project_test_plan", root),
         fn: () =>
           tool.execute(
             {
               autoApprove: true,
+              satisfiedCriteria: [],
               remainingQuestions: ["Should migrations be included?"],
             },
             ctx,

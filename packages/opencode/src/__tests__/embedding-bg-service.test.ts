@@ -10,6 +10,8 @@ const envKeys = [
   "OPENCODE_VOYAGE_API_KEY",
   "VOYAGE_API_KEY",
   "OPENCODE_EMBEDDING_MODEL",
+  "OPENCODE_EMBEDDING_TEXT_MODEL",
+  "OPENCODE_EMBEDDING_BOOT_TIMEOUT_MS",
   "OPENCODE_EMBEDDING_BASE_URL",
   "OPENCODE_EMBEDDING_DIMENSIONS",
 ] as const
@@ -33,19 +35,100 @@ afterEach(() => {
 })
 
 describe("embedding background service bootstrap config", () => {
-  test("uses fallback by default under Bun runtime to avoid unsafe transformers boot", async () => {
-    const { EmbeddingBackgroundService } = await import("../ai/rag/embedding-bg-service")
-    const service = new EmbeddingBackgroundService()
+  test("prefers transformers by default and boots it in the background", async () => {
+    const embeddingModule = await import("../ai/rag/embedding")
+    const originalConfigureProvider = embeddingModule.embeddingService.configureProvider
+    const originalRuntimeState = embeddingModule.embeddingService.getRuntimeState
 
-    await service.start()
+    ;(embeddingModule.embeddingService as any).configureProvider = async () => undefined
+    ;(embeddingModule.embeddingService as any).getRuntimeState = () => ({
+      mode: "provider",
+      activeProvider: "transformers-multimodal",
+      configuredProvider: "transformers-multimodal",
+      activeProviderKind: "transformers",
+      updatedAt: Date.now(),
+    })
 
-    expect(service.getStatus()).toBe("fallback")
-    const runtime = service.getRuntimeContext()
-    expect(runtime.targetProvider).toBe("fallback")
-    expect(runtime.source).toBe("default")
-    expect(runtime.mode).toBe("fallback")
+    try {
+      const { EmbeddingBackgroundService } = await import("../ai/rag/embedding-bg-service")
+      const service = new EmbeddingBackgroundService()
 
-    await service.stop()
+      await service.start()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      expect(service.getStatus()).toBe("ready")
+      const runtime = service.getRuntimeContext()
+      expect(runtime.targetProvider).toBe("transformers")
+      expect(runtime.source).toBe("default")
+      expect(runtime.mode).toBe("provider")
+
+      await service.stop()
+    } finally {
+      ;(embeddingModule.embeddingService as any).configureProvider = originalConfigureProvider
+      ;(embeddingModule.embeddingService as any).getRuntimeState = originalRuntimeState
+    }
+  })
+
+  test("falls back immediately when default transformers boot fails", async () => {
+    const embeddingModule = await import("../ai/rag/embedding")
+    const originalConfigureProvider = embeddingModule.embeddingService.configureProvider
+
+    ;(embeddingModule.embeddingService as any).configureProvider = async () => {
+      throw new Error("ConnectionRefused")
+    }
+
+    try {
+      const { EmbeddingBackgroundService } = await import("../ai/rag/embedding-bg-service")
+      const service = new EmbeddingBackgroundService()
+
+      await service.start()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      const startedAt = Date.now()
+      const ready = await service.waitForProvider(1000)
+      const elapsedMs = Date.now() - startedAt
+
+      expect(ready).toBeFalse()
+      expect(elapsedMs).toBeLessThan(250)
+      expect(service.getStatus()).toBe("fallback")
+      const runtime = service.getRuntimeContext()
+      expect(runtime.targetProvider).toBe("transformers")
+      expect(runtime.source).toBe("default")
+      expect(runtime.mode).toBe("fallback")
+      expect(runtime.lastError).toContain("ConnectionRefused")
+
+      await service.stop()
+    } finally {
+      ;(embeddingModule.embeddingService as any).configureProvider = originalConfigureProvider
+    }
+  })
+
+  test("times out default transformers boot quickly when provider init hangs", async () => {
+    process.env.OPENCODE_EMBEDDING_BOOT_TIMEOUT_MS = "50"
+
+    const embeddingModule = await import("../ai/rag/embedding")
+    const originalConfigureProvider = embeddingModule.embeddingService.configureProvider
+
+    ;(embeddingModule.embeddingService as any).configureProvider = () => new Promise(() => undefined)
+
+    try {
+      const { EmbeddingBackgroundService } = await import("../ai/rag/embedding-bg-service")
+      const service = new EmbeddingBackgroundService()
+
+      const startedAt = Date.now()
+      await service.start()
+      await new Promise((resolve) => setTimeout(resolve, 90))
+      const elapsedMs = Date.now() - startedAt
+
+      expect(service.getStatus()).toBe("fallback")
+      expect(elapsedMs).toBeLessThan(300)
+      expect(service.getRuntimeContext().lastError).toContain("timed out")
+      await expect(service.waitForProvider(50)).resolves.toBeFalse()
+
+      await service.stop()
+    } finally {
+      ;(embeddingModule.embeddingService as any).configureProvider = originalConfigureProvider
+    }
   })
 
   test("respects fallback mode from env without booting real provider", async () => {
@@ -57,12 +140,45 @@ describe("embedding background service bootstrap config", () => {
     await service.start()
 
     expect(service.getStatus()).toBe("fallback")
+    await expect(service.waitForProvider(50)).resolves.toBeFalse()
     const runtime = service.getRuntimeContext()
     expect(runtime.targetProvider).toBe("fallback")
     expect(runtime.source).toBe("env")
     expect(runtime.mode).toBe("fallback")
 
     await service.stop()
+  })
+
+  test("transformers init failures stay on fallback without waiting out the timeout", async () => {
+    process.env.OPENCODE_EMBEDDING_PROVIDER = "transformers"
+
+    const embeddingModule = await import("../ai/rag/embedding")
+    const originalConfigureProvider = embeddingModule.embeddingService.configureProvider
+
+    ;(embeddingModule.embeddingService as any).configureProvider = async () => {
+      throw new Error("ConnectionRefused")
+    }
+
+    try {
+      const { EmbeddingBackgroundService } = await import("../ai/rag/embedding-bg-service")
+      const service = new EmbeddingBackgroundService()
+
+      await service.start()
+      await new Promise((resolve) => setTimeout(resolve, 20))
+
+      const startedAt = Date.now()
+      const ready = await service.waitForProvider(1000)
+      const elapsedMs = Date.now() - startedAt
+
+      expect(ready).toBeFalse()
+      expect(elapsedMs).toBeLessThan(250)
+      expect(service.getStatus()).toBe("fallback")
+      expect(service.getRuntimeContext().lastError).toContain("ConnectionRefused")
+
+      await service.stop()
+    } finally {
+      ;(embeddingModule.embeddingService as any).configureProvider = originalConfigureProvider
+    }
   })
 
   test("reports unsupported provider names as runtime errors and falls back", async () => {

@@ -136,7 +136,14 @@ class SochDBCacheBackend<T> implements CacheBackend<T> {
 
   async set(key: string, entry: CacheEntry<T>) {
     if (!this.ready || !this.db) return
-    await sochPutJson(this.db, key, entry)
+    try {
+      await sochPutJson(this.db, key, entry)
+    } catch (error) {
+      this.ready = false
+      this.db = undefined
+      this.initTask = undefined
+      throw error
+    }
   }
 
   async delete(key: string) {
@@ -325,8 +332,32 @@ export class ManagedCache<T> {
     await Promise.all(
       this.backends.map(async (backend) => {
         if (backend.isReady()) {
-          await backend.set(key, entry)
-          return
+          try {
+            await backend.set(key, entry)
+            return
+          } catch (error) {
+            const errorText = String(error)
+            const isKnowledgeSochWriteNoise =
+              this.options.name.startsWith("knowledge-snapshot:") &&
+              backend.name.startsWith("sochdb:") &&
+              /Failed to put value/i.test(errorText)
+
+            if (isKnowledgeSochWriteNoise) {
+              log.debug("cache backend write skipped", {
+                cache: this.options.name,
+                backend: backend.name,
+                key,
+                error: errorText,
+              })
+            } else {
+              log.warn("cache backend write failed", {
+                cache: this.options.name,
+                backend: backend.name,
+                key,
+                error: errorText,
+              })
+            }
+          }
         }
         this.queuePendingEntry(backend.name, key, entry)
       }),
@@ -385,11 +416,25 @@ export class ManagedCache<T> {
           this.notifyReady()
         })
         .catch((error) => {
-          log.warn("cache backend init failed", {
-            cache: this.options.name,
-            backend: backend.name,
-            error: String(error),
-          })
+          const errorText = String(error)
+          const isKnowledgeSochInitNoise =
+            this.options.name.startsWith("knowledge-snapshot:") &&
+            backend.name.startsWith("sochdb:") &&
+            /Failed to open database/i.test(errorText)
+
+          if (isKnowledgeSochInitNoise) {
+            log.debug("cache backend init skipped", {
+              cache: this.options.name,
+              backend: backend.name,
+              error: errorText,
+            })
+          } else {
+            log.warn("cache backend init failed", {
+              cache: this.options.name,
+              backend: backend.name,
+              error: errorText,
+            })
+          }
         })
       this.backendInitTasks.set(backend.name, task)
     }

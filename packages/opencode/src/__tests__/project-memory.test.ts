@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { projectInfo } from "../test-helpers/ids"
 
 const cleanup: string[] = []
 const envKeys = ["XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"] as const
@@ -65,15 +66,10 @@ describe("project memory", () => {
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: "project-memory-bootstrap-project",
-        worktree: workspace,
-        vcs: "git",
+      project: projectInfo("project-memory-bootstrap-project", workspace, {
         name: "Demo App",
         commands: { start: "bun run dev" },
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
+      }),
     })
 
     await Instance.provide({
@@ -109,13 +105,7 @@ describe("project memory", () => {
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: "project-memory-constraint-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
+      project: projectInfo("project-memory-constraint-project", workspace),
     })
 
     await Instance.provide({
@@ -151,13 +141,7 @@ describe("project memory", () => {
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: "project-memory-merge-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
+      project: projectInfo("project-memory-merge-project", workspace),
     })
 
     await Instance.provide({
@@ -187,13 +171,7 @@ describe("project memory", () => {
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: "project-memory-summary-refresh-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
+      project: projectInfo("project-memory-summary-refresh-project", workspace),
     })
 
     await Instance.provide({
@@ -233,13 +211,7 @@ describe("project memory", () => {
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: "project-memory-budget-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
+      project: projectInfo("project-memory-budget-project", workspace),
     })
 
     await Instance.provide({
@@ -285,13 +257,7 @@ describe("project memory", () => {
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: "project-memory-pressure-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
+      project: projectInfo("project-memory-pressure-project", workspace),
     })
 
     await Instance.provide({

@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { Instance } from "../project/instance"
+import { projectInfo } from "../test-helpers/ids"
 
 const cleanup: string[] = []
 const envKeys = ["XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"] as const
@@ -35,6 +37,15 @@ afterEach(async () => {
 })
 
 describe("derived knowledge graph", () => {
+  async function reloadWorkspace(workspace: string, id: string) {
+    const { Instance } = await import("../project/instance")
+    await Instance.reload({
+      directory: workspace,
+      worktree: workspace,
+      project: projectInfo(id, workspace),
+    })
+  }
+
   test("prefers imported module symbol when call targets collide across files", async () => {
     const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "opencode-knowledge-derived-import-call-"))
     cleanup.push(workspace)
@@ -53,18 +64,7 @@ describe("derived knowledge graph", () => {
       "utf8",
     )
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-import-call-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-import-call-project")
 
     await Instance.provide({
       directory: workspace,
@@ -119,18 +119,7 @@ describe("derived knowledge graph", () => {
       "utf8",
     )
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-ts-alias-call-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-ts-alias-call-project")
 
     await Instance.provide({
       directory: workspace,
@@ -192,18 +181,7 @@ describe("derived knowledge graph", () => {
       "utf8",
     )
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-ts-default-alias-call-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-ts-default-alias-call-project")
 
     await Instance.provide({
       directory: workspace,
@@ -259,18 +237,7 @@ describe("derived knowledge graph", () => {
       "utf8",
     )
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-ts-reexport-named-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-ts-reexport-named-project")
 
     await Instance.provide({
       directory: workspace,
@@ -326,18 +293,7 @@ describe("derived knowledge graph", () => {
       "utf8",
     )
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-ts-reexport-star-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-ts-reexport-star-project")
 
     await Instance.provide({
       directory: workspace,
@@ -393,18 +349,7 @@ describe("derived knowledge graph", () => {
       "utf8",
     )
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-ts-reexport-namespace-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-ts-reexport-namespace-project")
 
     await Instance.provide({
       directory: workspace,
@@ -461,18 +406,7 @@ describe("derived knowledge graph", () => {
       "utf8",
     )
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-ts-reexport-namespace-multihop-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-ts-reexport-namespace-multihop-project")
 
     await Instance.provide({
       directory: workspace,
@@ -528,18 +462,7 @@ describe("derived knowledge graph", () => {
       "utf8",
     )
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-ts-reexport-cycle-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-ts-reexport-cycle-project")
 
     await Instance.provide({
       directory: workspace,
@@ -603,18 +526,7 @@ describe("derived knowledge graph", () => {
       "utf8",
     )
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-ts-mixed-imports-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-ts-mixed-imports-project")
 
     await Instance.provide({
       directory: workspace,
@@ -684,18 +596,7 @@ describe("derived knowledge graph", () => {
     })
     if (!parseProbe) return
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-rs-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-rs-project")
 
     await Instance.provide({
       directory: workspace,
@@ -764,18 +665,7 @@ describe("derived knowledge graph", () => {
       return
     }
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-py-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-py-project")
 
     await Instance.provide({
       directory: workspace,
@@ -841,18 +731,7 @@ describe("derived knowledge graph", () => {
     })
     if (!parseProbe) return
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-go-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-go-project")
 
     await Instance.provide({
       directory: workspace,
@@ -912,18 +791,7 @@ describe("derived knowledge graph", () => {
     })
     if (!parseProbe) return
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-java-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-java-project")
 
     await Instance.provide({
       directory: workspace,
@@ -973,18 +841,7 @@ describe("derived knowledge graph", () => {
       "utf8",
     )
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-java-local-import-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-java-local-import-project")
 
     await Instance.provide({
       directory: workspace,
@@ -1041,18 +898,7 @@ describe("derived knowledge graph", () => {
     })
     if (!parseProbe) return
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-cpp-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-cpp-project")
 
     await Instance.provide({
       directory: workspace,
@@ -1113,18 +959,7 @@ describe("derived knowledge graph", () => {
       "utf8",
     )
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-go-module-import-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-go-module-import-project")
 
     await Instance.provide({
       directory: workspace,
@@ -1183,18 +1018,7 @@ describe("derived knowledge graph", () => {
     })
     if (!parseProbe) return
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-go-qualified-call-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-go-qualified-call-project")
 
     await Instance.provide({
       directory: workspace,
@@ -1250,18 +1074,7 @@ describe("derived knowledge graph", () => {
       "utf8",
     )
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-ast-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-ast-project")
 
     await Instance.provide({
       directory: workspace,
@@ -1317,18 +1130,7 @@ describe("derived knowledge graph", () => {
     await fs.writeFile(path.join(workspace, "src", "helper.ts"), "export const helper = 1\n", "utf8")
     await fs.writeFile(path.join(workspace, "docs", "README.md"), "# Project Guide\n\nHello", "utf8")
 
-    const { Instance } = await import("../project/instance")
-    await Instance.reload({
-      directory: workspace,
-      worktree: workspace,
-      project: {
-        id: "derived-knowledge-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
-    })
+    await reloadWorkspace(workspace, "derived-knowledge-project")
 
     await Instance.provide({
       directory: workspace,

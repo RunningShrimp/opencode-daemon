@@ -8,12 +8,43 @@ export interface SochDBModule {
 
 let sochModulePromise: Promise<SochDBModule> | undefined
 
+const SOCHDB_TUI_NOISE = [/\[SochDB\]/i, /Native HNSW bindings loaded/i, /Concurrent mode functions loaded successfully/i]
+
+function shouldSuppressSochDBChunk(chunk: unknown) {
+  const text = typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf-8") : String(chunk)
+  return SOCHDB_TUI_NOISE.some((pattern) => pattern.test(text))
+}
+
+async function withSuppressedSochDBOutput<T>(action: () => Promise<T>): Promise<T> {
+  const stdoutWrite = process.stdout.write.bind(process.stdout)
+  const stderrWrite = process.stderr.write.bind(process.stderr)
+
+  process.stdout.write = ((chunk: any, ...args: any[]) => {
+    if (shouldSuppressSochDBChunk(chunk)) return true
+    return (stdoutWrite as any)(chunk, ...args)
+  }) as typeof process.stdout.write
+
+  process.stderr.write = ((chunk: any, ...args: any[]) => {
+    if (shouldSuppressSochDBChunk(chunk)) return true
+    return (stderrWrite as any)(chunk, ...args)
+  }) as typeof process.stderr.write
+
+  try {
+    return await action()
+  } finally {
+    process.stdout.write = stdoutWrite as typeof process.stdout.write
+    process.stderr.write = stderrWrite as typeof process.stderr.write
+  }
+}
+
 export async function loadSochDBModule(): Promise<SochDBModule> {
   if (!sochModulePromise) {
-    sochModulePromise = installAndLoad<SochDBModule>("@sochdb/sochdb").catch((error) => {
-      sochModulePromise = undefined
-      throw error
-    })
+    sochModulePromise = withSuppressedSochDBOutput(async () => installAndLoad<SochDBModule>("@sochdb/sochdb")).catch(
+      (error) => {
+        sochModulePromise = undefined
+        throw error
+      },
+    )
   }
 
   return sochModulePromise

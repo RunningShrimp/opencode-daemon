@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test"
+import type { Provider } from "../src/provider/provider"
 import { ProviderTransform } from "../src/provider/transform"
+import { modelID, providerID } from "../src/test-helpers/ids"
 
-const createModel = (id: string, providerID: string, reasoning: boolean = true) => ({
-  id: `${providerID}/${id}`,
-  providerID,
+const createModel = (id: string, provider: string, reasoning: boolean = true): Provider.Model => ({
+  id: modelID(`${provider}/${id}`),
+  providerID: providerID(provider),
   api: {
     id,
-    url: `https://api.${providerID}.com`,
+    url: `https://api.${provider}.com`,
     npm: "@ai-sdk/openai-compatible",
   },
   name: id,

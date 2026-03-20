@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { projectInfo, sessionID as makeSessionID } from "../test-helpers/ids"
 
 describe("todo markdown sync", () => {
   const envKeys = ["XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"] as const
@@ -20,13 +21,7 @@ describe("todo markdown sync", () => {
     await Instance.reload({
       directory: workspace,
       worktree: workspace,
-      project: {
-        id: "todo-markdown-project",
-        worktree: workspace,
-        vcs: "git",
-        time: { created: Date.now(), updated: Date.now() },
-        sandboxes: [],
-      },
+      project: projectInfo("todo-markdown-project", workspace),
     })
   })
 
@@ -45,7 +40,7 @@ describe("todo markdown sync", () => {
     }
   })
 
-  async function seedSession(sessionID: string, workspace: string) {
+  async function seedSession(sessionID: ReturnType<typeof makeSessionID>, workspace: string) {
     const { Instance } = await import("../project/instance")
     const { Database } = await import("../storage/db")
     const { ProjectTable } = await import("../project/project.sql")
@@ -91,12 +86,14 @@ describe("todo markdown sync", () => {
       fn: async () => {
         const { readTodoMarkdown, todoMarkdownPath, writeTodoMarkdown } = await import("../session/todo-markdown")
 
-        await writeTodoMarkdown("session-test", [
+        const sessionID = makeSessionID("session-test")
+
+        await writeTodoMarkdown(sessionID, [
           { content: "Inspect failing path", status: "in_progress", priority: "high" },
           { content: "Run focused tests", status: "pending", priority: "medium" },
         ])
 
-        const file = todoMarkdownPath("session-test")
+        const file = todoMarkdownPath(sessionID)
         const content = await fs.readFile(file, "utf8")
         expect(content).toContain("- [~] Inspect failing path")
 
@@ -112,7 +109,7 @@ describe("todo markdown sync", () => {
           "utf8",
         )
 
-        const parsed = await readTodoMarkdown("session-test")
+        const parsed = await readTodoMarkdown(sessionID)
         expect(parsed?.todos).toEqual([
           { content: "Inspect failing path", status: "completed", priority: "high" },
           { content: "Run focused tests", status: "pending", priority: "medium" },
@@ -133,7 +130,7 @@ describe("todo markdown sync", () => {
         const { SessionTable } = await import("../session/session.sql")
         const { Todo } = await import("../session/todo")
         const now = Date.now()
-        const sessionID = "ses_todo_markdown_test"
+        const sessionID = makeSessionID("ses_todo_markdown_test")
 
         Database.use((db) => {
           db.insert(ProjectTable)
@@ -224,7 +221,7 @@ describe("todo markdown sync", () => {
         const { SessionTable } = await import("../session/session.sql")
         const { Todo } = await import("../session/todo")
         const { todoMarkdownPath } = await import("../session/todo-markdown")
-        const sessionID = "ses_todo_attached_markdown"
+        const sessionID = makeSessionID("ses_todo_attached_markdown")
         const now = Date.now()
 
         Database.use((db) => {
@@ -310,7 +307,7 @@ describe("todo markdown sync", () => {
         )
 
         await writeTodoMarkdown(
-          "session-inline-section",
+          makeSessionID("session-inline-section"),
           [
             { content: "inspect auth path", status: "completed", priority: "high" },
             { content: "run tests", status: "in_progress", priority: "medium" },
@@ -323,7 +320,7 @@ describe("todo markdown sync", () => {
         expect(content).toContain("- [x] inspect auth path")
         expect(content).toContain("- [~] run tests")
 
-        const parsed = await readTodoMarkdown("session-inline-section", { path: file, mode: "inline_checkboxes" })
+        const parsed = await readTodoMarkdown(makeSessionID("session-inline-section"), { path: file, mode: "inline_checkboxes" })
         expect(parsed?.todos).toEqual([
           { content: "inspect auth path", status: "completed", priority: "high" },
           { content: "run tests", status: "in_progress", priority: "medium" },
@@ -340,7 +337,7 @@ describe("todo markdown sync", () => {
       directory: workspace,
       fn: async () => {
         const { Todo } = await import("../session/todo")
-        const sessionID = "ses_todo_multi_doc_priority"
+        const sessionID = makeSessionID("ses_todo_multi_doc_priority")
         await seedSession(sessionID, workspace)
 
         const managed = path.join(workspace, "implementation-plan.md")
@@ -415,7 +412,7 @@ describe("todo markdown sync", () => {
       fn: async () => {
         const { Todo } = await import("../session/todo")
         const { todoMarkdownPath } = await import("../session/todo-markdown")
-        const sessionID = "ses_todo_sidecar_conflict"
+        const sessionID = makeSessionID("ses_todo_sidecar_conflict")
         await seedSession(sessionID, workspace)
 
         const documentPath = path.join(workspace, "tasks.md")
@@ -486,7 +483,7 @@ describe("todo markdown sync", () => {
       fn: async () => {
         const { Todo } = await import("../session/todo")
         const { todoMarkdownPath } = await import("../session/todo-markdown")
-        const sessionID = "ses_todo_empty_document_fallback"
+        const sessionID = makeSessionID("ses_todo_empty_document_fallback")
         await seedSession(sessionID, workspace)
 
         const emptyDoc = path.join(workspace, "plan.md")

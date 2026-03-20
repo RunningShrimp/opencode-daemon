@@ -31,6 +31,13 @@ export namespace SessionCompaction {
 
   const COMPACTION_BUFFER = 20_000
 
+  function usableInputTokens(model: Provider.Model, reserved?: number) {
+    const fallbackReserved = Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(model))
+    const context = model.limit.context
+    const reservedTokens = reserved ?? fallbackReserved
+    return model.limit.input ? model.limit.input - reservedTokens : context - ProviderTransform.maxOutputTokens(model)
+  }
+
   function tokenCount(tokens: MessageV2.Assistant["tokens"]) {
     return tokens.total || tokens.input + tokens.output + tokens.reasoning + tokens.cache.read + tokens.cache.write
   }
@@ -55,11 +62,8 @@ export namespace SessionCompaction {
 
     const count = tokenCount(input.tokens)
 
-    const reserved =
-      config.compaction?.reserved ?? Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model))
-    const usable = input.model.limit.input
-      ? input.model.limit.input - reserved
-      : context - ProviderTransform.maxOutputTokens(input.model)
+    const reserved = config.compaction?.reserved
+    const usable = usableInputTokens(input.model, reserved)
 
     if (count >= usable) return true
     if (!input.sessionID) return false
@@ -79,6 +83,20 @@ export namespace SessionCompaction {
     return false
   }
 
+  export async function isEstimatedOverflow(input: {
+    sessionID?: string
+    estimatedInputTokens: number
+    model: Provider.Model
+  }) {
+    const config = await Config.get()
+    if (config.compaction?.auto === false) return false
+    const context = input.model.limit.context
+    if (context === 0) return false
+
+    const usable = usableInputTokens(input.model, config.compaction?.reserved)
+    return input.estimatedInputTokens >= usable
+  }
+
   export async function recordUsage(input: {
     sessionID: string
     tokens: MessageV2.Assistant["tokens"]
@@ -89,11 +107,7 @@ export namespace SessionCompaction {
     const context = input.model.limit.context
     if (context === 0) return
 
-    const reserved =
-      config.compaction?.reserved ?? Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model))
-    const usable = input.model.limit.input
-      ? input.model.limit.input - reserved
-      : context - ProviderTransform.maxOutputTokens(input.model)
+    const usable = usableInputTokens(input.model, config.compaction?.reserved)
 
     const breakdown = tokenBreakdown(input.tokens)
     getPredictor(input.sessionID).record(breakdown.input, breakdown.output, usable)

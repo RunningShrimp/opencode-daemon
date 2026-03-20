@@ -8,6 +8,7 @@ import { Instance } from "@/project/instance"
 import { Log } from "@/util/log"
 import { vectorStore } from "./vector-store"
 import { embeddingService } from "./embedding"
+import { ensureEmbeddingBackgroundServiceStarted } from "./embedding-bg-service"
 import { createIndexer, ensureProjectIndexed } from "./indexer"
 import { GroundingBundle, evidenceFromVectorResult } from "./evidence"
 import { EvidenceLedger } from "@/ai/evidence/ledger"
@@ -56,6 +57,9 @@ This helps reduce hallucinations by grounding your understanding in actual code.
         autoIndexed = warm.indexed
       }
 
+      await ensureEmbeddingBackgroundServiceStarted().catch((error) => {
+        log.warn("failed to start embedding background service for rag query", { error: String(error) })
+      })
       const queryEmbeddings = await embeddingService.getQueryEmbeddings(args.query)
       const results = await vectorStore.search(queryEmbeddings, {
         limit: args.limit || 5,

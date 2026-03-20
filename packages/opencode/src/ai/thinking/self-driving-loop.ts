@@ -68,6 +68,12 @@ export interface RemainingWorkReport {
   suggestedActions: string[]
 }
 
+const NON_ACTIONABLE_COMPLETION_CRITERIA = [
+  /^task completed successfully$/i,
+  /^all requirements met$/i,
+  /^quality standards maintained$/i,
+]
+
 export class SelfDrivingLoop {
   private monitor: SelfMonitor
   private metacognition: MetacognitionEngine
@@ -108,7 +114,18 @@ export class SelfDrivingLoop {
     }
   }
 
+  private setPhase(phase: LoopPhase) {
+    if (this.loopState.phase === phase) {
+      this.loopState.consecutiveSamePhase += 1
+    } else {
+      this.loopState.consecutiveSamePhase = 0
+    }
+    this.loopState.phase = phase
+    this.loopState.stepCount = this.stepCount
+  }
+
   async initialize(userInput: string, intent: TaskIntent): Promise<void> {
+    this.setPhase(LoopPhase.SENSING)
     this.monitor.transitionState(AgentState.THINKING)
     this.loopState.context = {
       userInput,
@@ -145,10 +162,12 @@ export class SelfDrivingLoop {
     return criteria
   }
   async sense(): Promise<void> {
+    this.setPhase(LoopPhase.SENSING)
     this.monitor.transitionState(AgentState.SENSING)
   }
   
   async perceive(context?: Record<string, unknown>): Promise<void> {
+    this.setPhase(LoopPhase.PERCEIVING)
     this.monitor.transitionState(AgentState.PERCEIVING)
     if (context) {
         this.loopState.context = { ...this.loopState.context, ...context }
@@ -156,6 +175,7 @@ export class SelfDrivingLoop {
   }
   
   async plan(): Promise<void> {
+    this.setPhase(LoopPhase.PLANNING)
     this.monitor.transitionState(AgentState.PLANNING)
 
     if (this.loopState.currentGoal) {
@@ -189,6 +209,7 @@ export class SelfDrivingLoop {
     }
   }
   async act(): Promise<string | undefined> {
+    this.setPhase(LoopPhase.ACTING)
     this.monitor.transitionState(AgentState.EXECUTING)
     // Surface the most recent high-confidence decision as execution guidance
     const pending = this.loopState.pendingDecisions
@@ -207,6 +228,7 @@ export class SelfDrivingLoop {
   }
   
   async reflect(): Promise<void> {
+    this.setPhase(LoopPhase.REFLECTING)
     this.monitor.transitionState(AgentState.REFLECTING)
     try {
       const reflection = await this.metacognition.reflect("Periodic reflection")
@@ -245,10 +267,12 @@ export class SelfDrivingLoop {
   }
   
   async learn(): Promise<void> {
+    this.setPhase(LoopPhase.LEARNING)
     this.monitor.transitionState(AgentState.LEARNING)
   }
   
   async adapt(): Promise<void> {
+    this.setPhase(LoopPhase.ADAPTING)
     this.monitor.transitionState(AgentState.ADAPTING)
     try {
       const adaptations = this.goalManager.adaptGoals("Automatic adaptation triggered")
@@ -298,6 +322,7 @@ export class SelfDrivingLoop {
   
   async runStep(): Promise<LoopDecision> {
     this.stepCount++
+    this.loopState.stepCount = this.stepCount
     const decision: LoopDecision = {
       phase: this.loopState.phase,
       action: "Continue",
@@ -352,12 +377,13 @@ ${expReport}
 
     const completed = this.getCompletedCriteria()
     const remaining = goal.successCriteria.filter((c) => !completed.includes(c))
+    const actionableRemaining = remaining.filter((criterion) => this.isActionableCriterion(criterion))
 
     return {
-      hasRemaining: remaining.length > 0,
-      items: remaining,
+      hasRemaining: actionableRemaining.length > 0,
+      items: actionableRemaining,
       progress: this.getProgress(),
-      suggestedActions: remaining.map((r) => `Address: ${r}`),
+      suggestedActions: actionableRemaining.map((r) => `Address: ${r}`),
     }
   }
   private getCompletedCriteria(): string[] {
@@ -374,10 +400,21 @@ ${expReport}
   }
   private isCriterionMet(criterion: string): boolean {
     const state = this.monitor.getState()
-    if (criterion.includes("complete") || criterion.includes("done")) {
+    const normalizedCriterion = criterion.trim().toLowerCase()
+    if (
+      normalizedCriterion.includes("complete") ||
+      normalizedCriterion.includes("completed") ||
+      normalizedCriterion.includes("done") ||
+      normalizedCriterion.includes("met") ||
+      normalizedCriterion.includes("maintained") ||
+      normalizedCriterion.includes("successful")
+    ) {
       return state.confidence > 0.8 && state.consecutiveErrors === 0
     }
     return false
+  }
+  private isActionableCriterion(criterion: string): boolean {
+    return !NON_ACTIONABLE_COMPLETION_CRITERIA.some((pattern) => pattern.test(criterion.trim()))
   }
   setupAutoContinueHooks(session: { on: (event: string, handler: (result: unknown) => Promise<void>) => void }) {
     session.on("tool_complete", async (_result) => {

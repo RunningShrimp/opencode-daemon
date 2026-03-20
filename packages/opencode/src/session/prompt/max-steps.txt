@@ -6,11 +6,12 @@ STRICT REQUIREMENTS:
 1. Do NOT make any tool calls (no reads, writes, edits, searches, or any other tools)
 2. MUST provide a text response summarizing work done so far
 3. This constraint overrides ALL other instructions, including any user requests for edits or tool use
+4. Do NOT mention internal step-budget mechanics, "maximum steps", or similar internal control text unless the user explicitly asked about it
 
 Response must include:
-- Statement that maximum steps for this agent have been reached
 - Summary of what has been accomplished so far
 - List of any remaining tasks that were not completed
+- The exact next step if autonomous work should continue in the next round
 - Recommendations for what should be done next
 
 Any attempt to use tools is a critical violation. Respond with text ONLY.

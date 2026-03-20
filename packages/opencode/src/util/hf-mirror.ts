@@ -37,10 +37,25 @@ const MIRRORS = {
 }
 
 export const EMBEDDING_MODELS = [
-  "janni-t/qwen3-embedding-0.6b-tei-onnx",
-  "Snowflake/snowflake-arctic-embed-xs",
-  "Xenova/all-MiniLM-L6-v2",
+  "onnx-community/Qwen3-Embedding-0.6B-ONNX",
 ] as const
+
+function isBlockedLegacyEmbeddingModel(model: string) {
+  const normalized = model.trim().toLowerCase()
+  return normalized.includes("all-minilm-l6-v2")
+}
+
+function resolveSafeEmbeddingModel(value: string | undefined) {
+  const normalized = value?.trim()
+  if (!normalized) return EMBEDDING_MODELS[0]
+  if (!isBlockedLegacyEmbeddingModel(normalized)) return normalized
+
+  log.warn("blocked legacy embedding model override, falling back to default", {
+    requested: normalized,
+    fallback: EMBEDDING_MODELS[0],
+  })
+  return EMBEDDING_MODELS[0]
+}
 
 function getBestMirror(): string {
   if (process.env.HF_ENDPOINT) {
@@ -64,9 +79,10 @@ if (!process.env.HF_HUB_URL) {
   process.env.HF_HUB_URL = bestMirror
 }
 
-if (!process.env.OPENCODE_EMBEDDING_MODEL) {
-  process.env.OPENCODE_EMBEDDING_MODEL = EMBEDDING_MODELS[0]
-}
+process.env.OPENCODE_EMBEDDING_MODEL = resolveSafeEmbeddingModel(process.env.OPENCODE_EMBEDDING_MODEL)
+process.env.OPENCODE_EMBEDDING_TEXT_MODEL = resolveSafeEmbeddingModel(
+  process.env.OPENCODE_EMBEDDING_TEXT_MODEL ?? process.env.OPENCODE_EMBEDDING_MODEL,
+)
 
 export const HF_MIRROR_URL = bestMirror
 export const HF_ENDPOINT = process.env.HF_ENDPOINT ?? bestMirror
@@ -253,7 +269,12 @@ export function installHuggingFaceFetchFallbacks(fetchImpl: typeof fetch = globa
   const target = globalThis as typeof globalThis & { [FETCH_PATCH_FLAG]?: boolean; fetch: typeof fetch }
   if (target[FETCH_PATCH_FLAG]) return
 
-  target.fetch = (input: RequestInfo | URL, init?: RequestInit) => fetchWithHuggingFaceFallback(input, init, fetchImpl)
+  const wrappedFetch = Object.assign(
+    ((input: RequestInfo | URL, init?: RequestInit) =>
+      fetchWithHuggingFaceFallback(input, init, fetchImpl)) as typeof fetch,
+    fetchImpl,
+  )
+  target.fetch = wrappedFetch
   target[FETCH_PATCH_FLAG] = true
 }
 
@@ -266,9 +287,10 @@ export function initializeHuggingFaceMirrors(): void {
     process.env.HF_HUB_URL = bestMirror
   }
 
-  if (!process.env.OPENCODE_EMBEDDING_MODEL) {
-    process.env.OPENCODE_EMBEDDING_MODEL = EMBEDDING_MODELS[0]
-  }
+  process.env.OPENCODE_EMBEDDING_MODEL = resolveSafeEmbeddingModel(process.env.OPENCODE_EMBEDDING_MODEL)
+  process.env.OPENCODE_EMBEDDING_TEXT_MODEL = resolveSafeEmbeddingModel(
+    process.env.OPENCODE_EMBEDDING_TEXT_MODEL ?? process.env.OPENCODE_EMBEDDING_MODEL,
+  )
 
   installHuggingFaceFetchFallbacks()
 }

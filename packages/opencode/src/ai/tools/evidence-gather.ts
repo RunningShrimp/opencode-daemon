@@ -4,6 +4,7 @@ import { Evidence, EvidenceSource, createEvidence } from "@/ai/thinking/evidence
 import { EvidenceLedger } from "@/ai/evidence/ledger"
 import { Instance } from "@/project/instance"
 import { embeddingService } from "@/ai/rag/embedding"
+import { ensureEmbeddingBackgroundServiceStarted } from "@/ai/rag/embedding-bg-service"
 import { ensureProjectIndexed } from "@/ai/rag/indexer"
 import { vectorStore } from "@/ai/rag/vector-store"
 import { WorkflowOrchestrator } from "@/ai/workflow/orchestrator"
@@ -139,6 +140,7 @@ async function gatherProjectEvidence(
   }
 
   const query = searchQuery?.trim() || hypothesis
+  await ensureEmbeddingBackgroundServiceStarted().catch(() => undefined)
   const queryEmbeddings = await embeddingService.getQueryEmbeddings(query)
   const results = await vectorStore.search(queryEmbeddings, {
     projectId: project.id,

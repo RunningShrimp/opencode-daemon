@@ -38,6 +38,26 @@ function splitWork(prompt: string) {
     .filter(Boolean)
 }
 
+function fallbackGoalForIntent(intent: TaskIntent) {
+  switch (intent.type) {
+    case "review":
+      return intent.target.trim() || `Perform a ${intent.scope} review`
+    case "debugging":
+      return intent.error.trim() || "Investigate the reported failure"
+    case "exploration":
+      return intent.query.trim() || "Answer the current request"
+    case "implementation":
+      return intent.description.trim() || "Implement the requested change"
+    default:
+      return "Resolve the current turn"
+  }
+}
+
+function normalizePlannerGoal(prompt: string, intent: TaskIntent) {
+  const trimmed = prompt.trim()
+  return trimmed || fallbackGoalForIntent(intent)
+}
+
 function extractConstraints(prompt: string) {
   const constraints: StructuredTaskPlan["constraints"] = []
   const lines = prompt.split(/\n+/).map((line) => line.trim())
@@ -147,11 +167,11 @@ function inspectTaskForIntent(intent: TaskIntent) {
     case "review":
       return `Inspect the ${intent.scope} review surface and gather candidate evidence`
     case "debugging":
-      return `Inspect the failing path and reproduce or isolate the error: ${intent.error}`
+      return `Inspect the failing path and reproduce or isolate the error: ${intent.error.trim() || "reported failure"}`
     case "exploration":
-      return `Inspect the relevant code or docs needed to answer: ${intent.query}`
+      return `Inspect the relevant code or docs needed to answer: ${intent.query.trim() || "current request"}`
     case "implementation":
-      return `Inspect the existing implementation surface for: ${intent.description}`
+      return `Inspect the existing implementation surface for: ${intent.description.trim() || "requested change"}`
     default:
       return "Inspect the relevant implementation surface"
   }
@@ -160,15 +180,15 @@ function inspectTaskForIntent(intent: TaskIntent) {
 function primaryExecutionTask(intent: TaskIntent, prompt: string) {
   switch (intent.type) {
     case "review":
-      return `Review the target and enumerate evidence-backed findings: ${intent.target}`
+      return `Review the target and enumerate evidence-backed findings: ${intent.target.trim() || "requested target"}`
     case "debugging":
-      return `Fix the root cause for: ${intent.error}`
+      return `Fix the root cause for: ${intent.error.trim() || "reported failure"}`
     case "exploration":
-      return `Answer the exploration request directly: ${intent.query}`
+      return `Answer the exploration request directly: ${intent.query.trim() || "current request"}`
     case "implementation":
       return `Implement the requested change: ${intent.description || prompt}`
     default:
-      return `Resolve the requested task: ${prompt}`
+      return prompt.trim() ? `Resolve the requested task: ${prompt}` : "Resolve the current turn"
   }
 }
 
@@ -310,13 +330,14 @@ function defaultEvidence(intent: TaskIntent) {
 }
 
 export function buildStructuredTaskPlan(input: { sessionID: string; prompt: string; intent: TaskIntent }): StructuredTaskPlan {
+  const goal = normalizePlannerGoal(input.prompt, input.intent)
   const constraints = extractConstraints(input.prompt)
-  const taskGraph = inferPlanTasks(input.prompt, input.intent, constraints)
-  const plan = buildPlanFromTaskGraph(input.sessionID, input.prompt.trim(), taskGraph)
+  const taskGraph = inferPlanTasks(goal, input.intent, constraints)
+  const plan = buildPlanFromTaskGraph(input.sessionID, goal, taskGraph)
 
   return StructuredTaskPlan.parse({
     intentType: input.intent.type,
-    goal: input.prompt.trim(),
+    goal,
     constraints,
     successCriteria: defaultCriteria(input.intent),
     evidenceNeeds: defaultEvidence(input.intent),

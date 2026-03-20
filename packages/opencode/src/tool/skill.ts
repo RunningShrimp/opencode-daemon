@@ -4,7 +4,7 @@ import z from "zod"
 import { Tool } from "./tool"
 import { Skill } from "../skill"
 import { Ripgrep } from "../file/ripgrep"
-import { iife } from "@/util/iife"
+import { PermissionNext } from "../permission/next"
 
 export const SkillTool = Tool.define("skill", async (ctx) => {
   const list = await Skill.available(ctx?.agent)
@@ -44,39 +44,44 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
       const skill = await Skill.get(params.name)
 
       if (!skill) {
-        const available = await Skill.all().then((x) => x.map((skill) => skill.name).join(", "))
+        const available = list.map((s) => s.name).join(", ")
         throw new Error(`Skill "${params.name}" not found. Available skills: ${available || "none"}`)
       }
 
-      await ctx.ask({
-        permission: "skill",
-        patterns: [params.name],
-        always: [params.name],
-        metadata: {},
-      })
+      try {
+        await ctx.ask({
+          permission: "skill",
+          patterns: [params.name],
+          always: [params.name],
+          metadata: {},
+        })
+      } catch (error) {
+        if (error instanceof PermissionNext.DeniedError) {
+          throw new Error(`Permission denied for skill "${params.name}"`)
+        }
+        throw error
+      }
 
       const dir = path.dirname(skill.location)
       const base = pathToFileURL(dir).href
 
       const limit = 10
-      const files = await iife(async () => {
-        const arr = []
-        for await (const file of Ripgrep.files({
-          cwd: dir,
-          follow: false,
-          hidden: true,
-          signal: ctx.abort,
-        })) {
-          if (file.includes("SKILL.md")) {
-            continue
-          }
-          arr.push(path.resolve(dir, file))
-          if (arr.length >= limit) {
-            break
-          }
+      const arr: string[] = []
+      for await (const file of Ripgrep.files({
+        cwd: dir,
+        follow: false,
+        hidden: true,
+        signal: ctx.abort,
+      })) {
+        if (file.includes("SKILL.md")) {
+          continue
         }
-        return arr
-      }).then((f) => f.map((file) => `<file>${file}</file>`).join("\n"))
+        arr.push(path.resolve(dir, file))
+        if (arr.length >= limit) {
+          break
+        }
+      }
+      const files = arr.map((file) => `<file>${file}</file>`).join("\n")
 
       return {
         title: `Loaded skill: ${skill.name}`,

@@ -4,13 +4,13 @@ import { fetchWithHuggingFaceFallback, getHuggingFaceFallbackCandidates } from "
 describe("hf-mirror", () => {
   test("builds fallback candidates with modelscope first", () => {
     const candidates = getHuggingFaceFallbackCandidates(
-      "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+      "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/main/tokenizer.json",
     )
 
     expect(candidates).toEqual([
-      "https://www.modelscope.cn/api/v1/models/Xenova/all-MiniLM-L6-v2/repo?Revision=main&FilePath=tokenizer.json",
-      "https://hf-mirror.com/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
-      "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+      "https://www.modelscope.cn/api/v1/models/onnx-community/Qwen3-Embedding-0.6B-ONNX/repo?Revision=main&FilePath=tokenizer.json",
+      "https://hf-mirror.com/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/main/tokenizer.json",
+      "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/main/tokenizer.json",
     ])
   })
 
@@ -35,7 +35,7 @@ describe("hf-mirror", () => {
     }) as typeof fetch
 
     const response = await fetchWithHuggingFaceFallback(
-      "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+      "https://huggingface.co/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/main/tokenizer.json",
       undefined,
       mockFetch,
     )
@@ -43,8 +43,8 @@ describe("hf-mirror", () => {
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ ok: true })
     expect(calls).toEqual([
-      "https://www.modelscope.cn/api/v1/models/Xenova/all-MiniLM-L6-v2/repo?Revision=main&FilePath=tokenizer.json",
-      "https://hf-mirror.com/Xenova/all-MiniLM-L6-v2/resolve/main/tokenizer.json",
+      "https://www.modelscope.cn/api/v1/models/onnx-community/Qwen3-Embedding-0.6B-ONNX/repo?Revision=main&FilePath=tokenizer.json",
+      "https://hf-mirror.com/onnx-community/Qwen3-Embedding-0.6B-ONNX/resolve/main/tokenizer.json",
     ])
   })
 

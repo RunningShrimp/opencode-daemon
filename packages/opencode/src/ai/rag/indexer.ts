@@ -13,7 +13,7 @@ import ignore from "ignore"
 import { Chunker, chunker, type Chunk } from "./chunker"
 import { VectorStore, type VectorEntry } from "./vector-store"
 import { embeddingService, type EmbeddingService } from "./embedding"
-import { embeddingBackgroundService } from "./embedding-bg-service"
+import { embeddingBackgroundService, ensureEmbeddingBackgroundServiceStarted } from "./embedding-bg-service"
 
 const log = Log.create({ service: "rag-indexer" })
 
@@ -283,8 +283,16 @@ export class RAGIndexer {
     const chunks = await this.indexFile(filePath)
     const entries: VectorEntry[] = []
 
-    // Wait for the real embedding provider to be ready (up to 5 s) before the
-    // batch embed loop so we don't wastefully index with the hash fallback.
+    // If a real embedding provider is still booting, give it a short chance to
+    // come online. Otherwise continue immediately with semantic fallback so
+    // indexing never blocks prompt input behind remote model downloads.
+    await ensureEmbeddingBackgroundServiceStarted().catch((error) => {
+      log.warn("failed to start embedding service for indexing", {
+        projectId: this.config.projectId,
+        filePath,
+        error: String(error),
+      })
+    })
     await embeddingBackgroundService.waitForProvider(5000)
 
     for (const chunk of chunks) {

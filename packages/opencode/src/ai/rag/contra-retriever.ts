@@ -12,6 +12,7 @@
 import { Log } from "@/util/log"
 import { vectorStore } from "./vector-store"
 import { embeddingService } from "./embedding"
+import { ensureEmbeddingBackgroundServiceStarted } from "./embedding-bg-service"
 import { Instance } from "@/project/instance"
 import { Ripgrep } from "@/file/ripgrep"
 import { EvidenceSource } from "@/ai/thinking/evidence"
@@ -292,6 +293,7 @@ export class FVARRAG {
     }
 
     try {
+      await ensureEmbeddingBackgroundServiceStarted().catch(() => undefined)
       const queryEmbeddings = await embeddingService.getQueryEmbeddings(query)
       if (queryEmbeddings.coarse.length > 0) {
         const vectorResults = await vectorStore.search(queryEmbeddings, {

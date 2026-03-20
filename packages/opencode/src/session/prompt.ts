@@ -4,6 +4,7 @@ import fs from "fs/promises"
 import z from "zod"
 import { Filesystem } from "../util/filesystem"
 import { SessionID, MessageID, PartID } from "./schema"
+import type { ProjectID } from "../project/schema"
 import { MessageV2 } from "./message-v2"
 import { Log } from "../util/log"
 import { SessionRevert } from "./revert"
@@ -17,7 +18,7 @@ import { Instance } from "../project/instance"
 import { Bus } from "../bus"
 import { Todo } from "./todo"
 import { ProviderTransform } from "../provider/transform"
-import { createSelfDrivenAgent, SelfDrivenAgent } from "../ai/thinking/self-driven-agent"
+import { createSelfDrivenAgent, SelfDrivenAgent, type AgentContext } from "../ai/thinking/self-driven-agent"
 import { IntentDetection, type TaskIntent } from "../ai/thinking/intent"
 import { SystemPrompt } from "./system"
 import { InstructionPrompt } from "./instruction"
@@ -25,6 +26,7 @@ import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
 import MAX_STEPS from "../session/prompt/max-steps.txt"
+import MAX_STEPS_AUTONOMOUS from "../session/prompt/max-steps-autonomous.txt"
 import { defer } from "../util/defer"
 import { ToolRegistry } from "../tool/registry"
 import { MCP } from "../mcp"
@@ -58,7 +60,7 @@ import { buildAutoGroundingContext, extractAutoGroundingQueryFromParts } from "@
 import { EvidenceLedger } from "@/ai/evidence/ledger"
 import { writeTodoMarkdown } from "./todo-markdown"
 import { verifyWithFVA, buildGroundingConstraints } from "@/ai/rag/contra-retriever"
-import { WorkflowOrchestrator } from "@/ai/workflow/orchestrator"
+import { WorkflowOrchestrator, type WorkflowState } from "@/ai/workflow/orchestrator"
 import { ProjectMemory } from "@/ai/memory/project-memory"
 import { LearningStore } from "@/ai/memory/learning-store"
 import { KnowledgeContext } from "@/ai/knowledge/context"
@@ -93,7 +95,13 @@ export namespace SessionPrompt {
   }
 
   /** @internal Exported for testing */
-  export function shouldRunAnswerVerification(input: { intent?: TaskIntent }) {
+  export function shouldRunAnswerVerification(input: {
+    intent?: TaskIntent
+    syntheticReminderLoop?: boolean
+    hasNextRoundTask?: boolean
+  }) {
+    if (input.syntheticReminderLoop || input.hasNextRoundTask) return false
+    if (input.intent?.type === "implementation") return false
     return !(input.intent?.type === "exploration" && input.intent.mode === "question")
   }
 
@@ -121,6 +129,32 @@ export namespace SessionPrompt {
     }
   }
 
+  function buildOptimizedModelContext(messages: MessageV2.WithParts[], model: Provider.Model) {
+    return MessageV2.prepareModelContext(messages, model, {
+      optimizeContext: true,
+    })
+  }
+
+  /** @internal Exported for testing */
+  export function estimatePostTurnCompactionTokens(input: {
+    messages: MessageV2.WithParts[]
+    model: Provider.Model
+    providerInputTokens?: number
+  }) {
+    const optimizedContext = buildOptimizedModelContext(input.messages, input.model)
+    return Math.max(optimizedContext.stats.estimatedTokensAfter, input.providerInputTokens ?? 0)
+  }
+
+  /** @internal Exported for testing */
+  export async function loadFinalAssistantMessage(sessionID: SessionID) {
+    await SessionCompaction.prune({ sessionID })
+    for await (const item of MessageV2.stream(sessionID)) {
+      if (item.info.role === "user") continue
+      return item
+    }
+    throw new Error("Impossible")
+  }
+
   function inferToolDescriptorSource(id: string): ToolDescriptor["source"] {
     if (["websearch", "webfetch"].includes(id)) return "web"
     if (["rag_query", "rag_index", "read", "grep", "glob", "codesearch"].includes(id)) return "retrieval"
@@ -143,17 +177,21 @@ export namespace SessionPrompt {
     lastFinished?: Pick<MessageV2.Assistant, "tokens">
     turnController: { shouldContinue(current: number): { shouldContinue: boolean; reason: string } }
     step: number
+    roundBaseStep?: number
     maxSteps: number
   }) {
+    const roundStep = Math.max(0, input.step - (input.roundBaseStep ?? 0))
+    const firstSyntheticRoundStep = input.roundBaseStep !== undefined && input.step === input.roundBaseStep + 1
     const turnDecision =
       input.turnControlReady && input.lastFinished?.tokens
         ? input.turnController.shouldContinue(tokenCount(input.lastFinished.tokens))
         : undefined
     const shouldWrapUp = !!turnDecision && !turnDecision.shouldContinue
+    const maxStepReached = firstSyntheticRoundStep ? roundStep > input.maxSteps : roundStep >= input.maxSteps
     return {
       turnDecision,
       shouldWrapUp,
-      isLastStep: input.step >= input.maxSteps || shouldWrapUp,
+      isLastStep: maxStepReached || shouldWrapUp,
     }
   }
 
@@ -165,9 +203,469 @@ export namespace SessionPrompt {
     return input.turnUserID ?? input.lastUserID
   }
 
+  /** @internal Exported for testing */
+  export function getAutonomousResumeMode(input: {
+    syntheticReminderLoop: boolean
+    hasPendingTodos: boolean
+    hasNextRoundTask: boolean
+  }) {
+    if (input.hasNextRoundTask) return "self_driven" as const
+    if (input.hasPendingTodos && !input.syntheticReminderLoop) return "todo" as const
+    return "stop" as const
+  }
+
+  /** @internal Exported for testing */
+  export function getStopHandoffResumeMode(input: {
+    syntheticReminderLoop: boolean
+    repeatingSelfDrivenHandoff: boolean
+    hasPendingTodos: boolean
+    hasNextRoundTask: boolean
+  }) {
+    if (input.repeatingSelfDrivenHandoff) {
+      if (input.hasPendingTodos) return "todo" as const
+      return "stop" as const
+    }
+    if (input.hasNextRoundTask) return "self_driven" as const
+    if (input.hasPendingTodos && !input.syntheticReminderLoop) return "todo" as const
+    return "stop" as const
+  }
+
+  /** @internal Exported for testing */
+  export function shouldEnforceTurnWrapUp(input: {
+    turnDecision?: { shouldContinue: boolean }
+    hasNextRoundTask: boolean
+  }) {
+    return !!input.turnDecision && !input.turnDecision.shouldContinue && !input.hasNextRoundTask
+  }
+
+  /** @internal Exported for testing */
+  export function hasOpenWorkflowTasks(workflowState?: Pick<WorkflowState, "plan">) {
+    const tasks = workflowState?.plan.plan.steps.flatMap((step) => step.tasks) ?? []
+    return tasks.some((task) => task.status === "pending" || task.status === "in_progress")
+  }
+
+  /** @internal Exported for testing */
+  export function getNoOpUnknownResumeMode(input: {
+    syntheticReminderLoop: boolean
+    repeatingSelfDrivenNoOpState: boolean
+    hasPendingTodos: boolean
+    hasOpenWorkflowTasks: boolean
+    hasNextRoundTask: boolean
+  }) {
+    if (input.hasNextRoundTask && !input.repeatingSelfDrivenNoOpState) return "self_driven" as const
+    if (input.repeatingSelfDrivenNoOpState) {
+      if (input.hasPendingTodos) return "todo" as const
+      if (input.hasOpenWorkflowTasks) return "workflow" as const
+      return "stop" as const
+    }
+    if (input.syntheticReminderLoop) return "stop" as const
+    if (input.hasPendingTodos) return "todo" as const
+    if (input.hasOpenWorkflowTasks) return "workflow" as const
+    return "stop" as const
+  }
+
+  function getNextWorkflowContinuationTask(workflowState?: Pick<WorkflowState, "plan">) {
+    const tasks = workflowState?.plan.plan.steps.flatMap((step) => step.tasks) ?? []
+    return tasks.find((task) => task.status === "in_progress") ?? tasks.find((task) => task.status === "pending")
+  }
+
+  async function recoverNoOpUnknownAssistantTurn(input: {
+    sessionID: SessionID
+    history: Awaited<ReturnType<typeof MessageV2.filterCompacted>>
+    lastUser: MessageV2.User
+    lastUserParts: MessageV2.Part[]
+    assistantParts: MessageV2.Part[]
+    assistantID?: MessageID
+    step: number
+    logLabel: string
+  }) {
+    const [todos, workflowState] = await Promise.all([
+      Todo.get(input.sessionID).catch(() => []),
+      WorkflowOrchestrator.get(input.sessionID),
+    ])
+    const hasPendingTodos = todos.some((todo) => todo.status === "pending" || todo.status === "in_progress")
+    const nextTodo = todos.find((todo) => todo.status === "in_progress") || todos.find((todo) => todo.status === "pending")
+    const nextWorkflowTask = getNextWorkflowContinuationTask(workflowState)
+    const selfDrivenState = extractSelfDrivenStateFromParts(input.assistantParts)
+    const syntheticReminderLoop = isSyntheticReminderMessage(input.lastUserParts)
+    const repeatingSelfDrivenNoOpState =
+      (syntheticReminderLoop && isSelfDrivenContinuationReminderMessage(input.lastUserParts)) ||
+      hasRepeatedSelfDrivenNoOpState({
+        history: input.history,
+        lastUserID: input.lastUser.id,
+        assistantParts: input.assistantParts,
+      })
+    if (repeatingSelfDrivenNoOpState && isTodoContinuationReminderMessage(input.lastUserParts)) {
+      log.info("stopping repeated todo reminder no-op loop", {
+        sessionID: input.sessionID,
+        step: input.step,
+        assistantID: input.assistantID,
+        nextAction: selfDrivenState?.nextAction,
+        nextTodo: nextTodo?.content,
+      })
+
+      await emitVisibleNoOpStallNotice({
+        sessionID: input.sessionID,
+        parentID: input.lastUser.id,
+        agent: input.lastUser.agent,
+        variant: input.lastUser.variant,
+        model: input.lastUser.model,
+        nextAction: selfDrivenState?.nextAction,
+        nextTodo: nextTodo?.content,
+      })
+
+      return false
+    }
+    const resumeMode = getNoOpUnknownResumeMode({
+      syntheticReminderLoop,
+      repeatingSelfDrivenNoOpState,
+      hasPendingTodos,
+      hasOpenWorkflowTasks: !!nextWorkflowTask,
+      hasNextRoundTask: !!selfDrivenState?.hasNextRoundTask,
+    })
+
+    if (resumeMode === "stop") {
+      return false
+    }
+
+    log.info(input.logLabel, {
+      sessionID: input.sessionID,
+      step: input.step,
+      assistantID: input.assistantID,
+      mode: resumeMode,
+      nextAction: selfDrivenState?.nextAction,
+      nextTodo: nextTodo?.content,
+      nextWorkflowTask: nextWorkflowTask?.description,
+    })
+
+    const reminder =
+      resumeMode === "self_driven"
+        ? buildSelfDrivenContinuationDirective({
+            currentStatus: selfDrivenState?.currentStatus ?? "phase=unknown | nextRoundTask=yes",
+            nextAction:
+              selfDrivenState?.nextAction ||
+              nextWorkflowTask?.description ||
+              nextTodo?.content ||
+              "Continue with the next concrete implementation step from the previous round.",
+            remainingItems: selfDrivenState?.remainingItems ?? [],
+          })
+        : resumeMode === "todo"
+        ? nextTodo
+          ? `The previous autonomous round produced no user-visible output, but your todo list still has unfinished work. Continue with: \"${nextTodo.content}\".`
+          : "The previous autonomous round produced no user-visible output, but your todo list still has unfinished work. Continue with the next pending item."
+        : nextWorkflowTask
+          ? `The previous autonomous round produced no user-visible output, but your workflow plan still has unfinished work. Continue with: \"${nextWorkflowTask.description}\".`
+          : "The previous autonomous round produced no user-visible output, but your workflow plan still has unfinished work. Continue with the next ready workflow task."
+
+    const resumeUserMsg = (await Session.updateMessage({
+      id: MessageID.ascending(),
+      sessionID: input.sessionID,
+      role: "user",
+      time: { created: Date.now() },
+      agent: input.lastUser.agent,
+      model: input.lastUser.model,
+    })) as MessageV2.User
+
+    await Session.updatePart({
+      id: PartID.ascending(),
+      messageID: resumeUserMsg.id,
+      sessionID: input.sessionID,
+      type: "text",
+      text: `<system-reminder>${reminder}</system-reminder>`,
+      synthetic: true,
+    })
+
+    return true
+  }
+
+  /** @internal Exported for testing */
+  export function getMaxStepPrompt(input: { hasNextRoundTask: boolean }) {
+    return input.hasNextRoundTask ? MAX_STEPS_AUTONOMOUS : MAX_STEPS
+  }
+
+  function sanitizeAutonomousNextAction(nextAction?: string) {
+    if (!nextAction) return undefined
+
+    const looksLikeStallNotice = (value: string) => {
+      const normalized = value.toLowerCase()
+      return (
+        normalized.includes("autonomous continuation stalled after repeated empty rounds") ||
+        normalized.includes("stopping this retry loop") ||
+        normalized.includes("same next action without producing user-visible progress")
+      )
+    }
+
+    const looksLikeProgressSummary = (value: string) => {
+      const normalized = value.toLowerCase()
+      return (
+        /^phase\s+\d+\s+complete\b/i.test(value) ||
+        normalized.includes("tasks committed") ||
+        normalized.includes("tests pass")
+      )
+    }
+
+    const normalizeActionLine = (value: string) =>
+      value
+        .trim()
+        .replace(/\*\*(.*?)\*\*/g, "$1")
+        .replace(/__(.*?)__/g, "$1")
+        .replace(/^[#>*\-\s]+/, "")
+        .trim()
+
+    const extractActionPayload = (value: string) => {
+      const normalized = normalizeActionLine(value)
+      const patterns = [
+        /(?:^|.*?\b)(?:the\s+)?exact\s+next\s+(?:step|action)(?:\s+if\s+autonomous\s+work\s+should\s+continue\s+in\s+the\s+next\s+round)?\s*[:：]\s*(.+)$/i,
+        /(?:^|.*?\b)next\s+round\s+action\s*[:：]\s*(.+)$/i,
+        /(?:^|.*?\b)next(?:\s+round|\s+action|\s+step)?\s*[:：]\s*(.+)$/i,
+        /(?:^|.*?\b)follow-up\s+action\s*[:：]\s*(.+)$/i,
+        /(?:^|.*?\b)immediate\s+next\s+step\s*[:：]\s*(.+)$/i,
+        /(?:^|.*?)(?:下一步)\s*[:：]\s*(.+)$/u,
+        /(?:^|.*?)(?:接下来)\s*[:：]\s*(.+)$/u,
+      ]
+
+      for (const pattern of patterns) {
+        const match = normalized.match(pattern)
+        if (match?.[1]) return match[1].trim()
+      }
+
+      return normalized
+    }
+
+    const stripAutonomousLeadIn = (value: string) => {
+      let stripped = value.trim()
+      const patterns = [
+        /^(?:let\s+me|i(?:'|’)ll|i\s+will|now\s+i(?:'|’)ll|now\s+i\s+will|i\s+am\s+going\s+to|i'm\s+going\s+to|we(?:'|’)ll|we\s+will|let(?:'|’)s|let\s+us|now\s+let(?:'|’)s|now\s+let\s+us)\s+/i,
+        /^(?:让我|我先|接下来我先|接下来先|下一步我先|下一步先)\s*/u,
+      ]
+
+      for (const pattern of patterns) {
+        if (pattern.test(stripped)) {
+          stripped = stripped.replace(pattern, "").trim()
+        }
+      }
+
+      return stripped
+    }
+
+    const looksLikeSectionLabel = (value: string) => {
+      const normalized = normalizeActionLine(value).toLowerCase()
+      return [
+        /^(?:the\s+)?exact\s+next\s+(?:step|action)(?:\s+if\s+autonomous\s+work\s+should\s+continue\s+in\s+the\s+next\s+round)?\s*[:：]?$/i,
+        /^next\s+round\s+action\s*[:：]?$/i,
+        /^next\s+(?:round|action|step)\s*[:：]?$/i,
+        /^follow-up\s+action\s*[:：]?$/i,
+        /^immediate\s+next\s+step\s*[:：]?$/i,
+        /^remaining\s+tasks?(?:\s+that\s+were\s+not\s+completed)?\s*[:：]?$/i,
+        /^recommendations?(?:\s+for\s+what\s+should\s+be\s+done\s+next)?\s*[:：]?$/i,
+        /^summary\s+of\s+what\s+has\s+been\s+accomplished\s+so\s+far\s*[:：]?$/i,
+        /^work\s+completed\s+summary\s*[:：]?$/i,
+        /^summary\s+of\s+work\s+(?:completed|accomplished)\s*[:：]?$/i,
+        /^current\s+status\s*[:：]?$/i,
+        /^status\s*[:：]?$/i,
+        /^blocker\s*[:：]?$/i,
+        /^下一步\s*[:：]?$/u,
+        /^接下来\s*[:：]?$/u,
+        /^剩余任务\s*[:：]?$/u,
+        /^待办事项\s*[:：]?$/u,
+        /^建议(?:下一步)?\s*[:：]?$/u,
+        /^总结\s*[:：]?$/u,
+      ].some((pattern) => pattern.test(normalized))
+    }
+
+    const looksLikeStatusOnlyLine = (value: string) => {
+      const normalized = normalizeActionLine(value).toLowerCase()
+      return (
+        looksLikeProgressSummary(normalized) ||
+        /^blocker\s*[:：]/i.test(normalized) ||
+        /^current\s+status\s*[:：]/i.test(normalized) ||
+        /^status\s*[:：]/i.test(normalized)
+      )
+    }
+
+    const lines = nextAction
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+
+    for (const line of lines) {
+      const extracted = stripAutonomousLeadIn(extractActionPayload(line))
+      if (!/[a-zA-Z\u4e00-\u9fff]/u.test(extracted)) continue
+      if (looksLikeStallNotice(extracted)) continue
+      if (looksLikeSectionLabel(extracted) || looksLikeStatusOnlyLine(extracted)) continue
+      return extracted
+    }
+
+    for (const line of lines) {
+      const normalized = stripAutonomousLeadIn(normalizeActionLine(line))
+      if (!/[a-zA-Z\u4e00-\u9fff]/u.test(normalized)) continue
+      if (looksLikeStallNotice(normalized)) continue
+      if (looksLikeSectionLabel(normalized) || looksLikeStatusOnlyLine(normalized)) continue
+      return normalized
+    }
+
+    return undefined
+  }
+
+  /** @internal Exported for testing */
+  export function buildSelfDrivenContinuationDirective(input: {
+    currentStatus: string
+    nextAction?: string
+    remainingItems: string[]
+  }) {
+    const nextAction =
+      sanitizeAutonomousNextAction(input.nextAction) ||
+      "Continue with the next concrete implementation step from the previous round."
+    const remainingItems =
+      input.remainingItems.length > 0
+        ? input.remainingItems.join(", ")
+        : "none recorded by the goal tracker"
+
+    return [
+      "Autonomous continuation is still required because unfinished work remains.",
+      "The previous assistant response was a rollover handoff, not a completion template.",
+      "Do not repeat work summaries, exact-next-step headings, or recommendation sections.",
+      `Current status: ${input.currentStatus}`,
+      `Execute this next action first: ${nextAction}`,
+      `Remaining items: ${remainingItems}.`,
+      "If you are about to call tools, start with the tool calls. Do not emit lead-in text like 'Let me...', 'Now I will...', 'Fixing...', or 'Running...' before the first external tool.",
+      "Use tools and make concrete progress before writing another summary. Only summarize after new execution or if blocked.",
+    ].join("\n")
+  }
+
+  /** @internal Exported for testing */
+  export function isSelfDrivenContinuationReminderMessage(parts?: MessageV2.Part[]) {
+    if (!parts) return false
+    if (!isSyntheticReminderMessage(parts)) return false
+
+    const reminderText =
+      parts
+        .flatMap((part) => (part.type === "text" ? [part.text] : []))
+        .join("\n")
+
+    return (
+      reminderText.includes("Autonomous continuation is still required because unfinished work remains.") &&
+      reminderText.includes("Execute this next action first:")
+    )
+  }
+
+  /** @internal Exported for testing */
+  export function isTodoContinuationReminderMessage(parts?: MessageV2.Part[]) {
+    if (!parts) return false
+    if (!isSyntheticReminderMessage(parts)) return false
+
+    const reminderText = parts
+      .flatMap((part) => (part.type === "text" ? [part.text] : []))
+      .join("\n")
+
+    return reminderText.includes("your todo list still has unfinished work")
+  }
+
+  function buildSelfDrivenNoOpStateSignature(state?: {
+    hasNextRoundTask?: boolean
+    currentStatus?: string
+    nextAction?: string
+    remainingItems?: string[]
+  }) {
+    if (!state?.hasNextRoundTask) return undefined
+
+    return JSON.stringify({
+      currentStatus: state.currentStatus?.trim() ?? "",
+      nextAction: state.nextAction?.trim() ?? "",
+      remainingItems: state.remainingItems ?? [],
+    })
+  }
+
+  /** @internal Exported for testing */
+  export function hasRepeatedSelfDrivenNoOpState(input: {
+    history: Awaited<ReturnType<typeof MessageV2.filterCompacted>>
+    lastUserID: MessageID
+    assistantParts: MessageV2.Part[]
+  }) {
+    const currentSignature = buildSelfDrivenNoOpStateSignature(extractSelfDrivenStateFromParts(input.assistantParts))
+    if (!currentSignature) return false
+
+    let passedLastUser = false
+    for (let index = input.history.length - 1; index >= 0; index--) {
+      const message = input.history[index]
+      if (!passedLastUser) {
+        if (message.info.id === input.lastUserID) passedLastUser = true
+        continue
+      }
+
+      if (message.info.role !== "assistant") continue
+
+      const previousAssistant = message.info as MessageV2.Assistant
+      if (!isNoOpUnknownAssistantTurn({ finish: previousAssistant.finish, parts: message.parts })) {
+        return false
+      }
+
+      const previousSignature = buildSelfDrivenNoOpStateSignature(extractSelfDrivenStateFromParts(message.parts))
+      return previousSignature === currentSignature
+    }
+
+    return false
+  }
+
+  async function emitVisibleNoOpStallNotice(input: {
+    sessionID: SessionID
+    parentID: MessageID
+    agent: string
+    variant?: string
+    model: {
+      providerID: ProviderID
+      modelID: ModelID
+    }
+    nextAction?: string
+    nextTodo?: string
+  }) {
+    const assistantMessage = (await Session.updateMessage({
+      id: MessageID.ascending(),
+      parentID: input.parentID,
+      role: "assistant",
+      mode: input.agent,
+      agent: input.agent,
+      variant: input.variant,
+      path: {
+        cwd: Instance.directory,
+        root: Instance.worktree,
+      },
+      cost: 0,
+      tokens: {
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+      modelID: input.model.modelID,
+      providerID: input.model.providerID,
+      finish: "stop",
+      time: {
+        created: Date.now(),
+        completed: Date.now(),
+      },
+      sessionID: input.sessionID,
+    })) as MessageV2.Assistant
+
+    await Session.updatePart({
+      id: PartID.ascending(),
+      messageID: assistantMessage.id,
+      sessionID: input.sessionID,
+      type: "text",
+      text: [
+        "Autonomous continuation stalled after repeated empty rounds.",
+        input.nextAction
+          ? `The model kept selecting the same next action without producing user-visible progress: ${input.nextAction}`
+          : "The model kept selecting the same next action without producing user-visible progress.",
+        input.nextTodo ? `The active todo is still pending: \"${input.nextTodo}\".` : "Todo work is still pending.",
+        "Stopping this retry loop so the session does not continue rendering empty internal turns.",
+      ].join("\n"),
+    })
+  }
+
   export interface CapabilitySystemPromptInput {
-    sessionID: string
-    projectID: string
+    sessionID: SessionID
+    projectID: ProjectID
     rootDir: string
     userInput: string
     intent?: TaskIntent
@@ -176,6 +674,11 @@ export namespace SessionPrompt {
     toolDescriptors: ToolDescriptor[]
     autoGroundingSystemPrompt?: string
     knowledgeGraph?: KnowledgeGraph
+    lightweightDelegatedTurn?: boolean
+  }
+
+  export function shouldUseDelegatedTurnFastPath(input: { parentID?: SessionID; hasAssistant: boolean }) {
+    return !!input.parentID && !input.hasAssistant
   }
 
   export async function buildCapabilitySystemPrompts(input: CapabilitySystemPromptInput) {
@@ -193,22 +696,24 @@ export namespace SessionPrompt {
     if (workflowState) {
       prompts.push(WorkflowOrchestrator.renderSystemContext(workflowState))
     }
-    const projectMemoryPrompt = await ProjectMemory.renderPromptContext(input.projectID, input.userInput)
-    if (projectMemoryPrompt) {
-      prompts.push(projectMemoryPrompt)
-      callouts.push({
-        tool: "project_memory",
-        title: "Project memory context injected",
-        description:
-          "Loads durable project memory about constraints, prior failures, and learned facts so the model starts from repository-specific context.",
-        output: "Injected project memory context for this turn.",
-        input: {
-          source: "project_memory",
-        },
-        metadata: {
-          capability: "project_memory",
-        },
-      })
+    if (!input.lightweightDelegatedTurn) {
+      const projectMemoryPrompt = await ProjectMemory.renderPromptContext(input.projectID, input.userInput)
+      if (projectMemoryPrompt) {
+        prompts.push(projectMemoryPrompt)
+        callouts.push({
+          tool: "project_memory",
+          title: "Project memory context injected",
+          description:
+            "Loads durable project memory about constraints, prior failures, and learned facts so the model starts from repository-specific context.",
+          output: "Injected project memory context for this turn.",
+          input: {
+            source: "project_memory",
+          },
+          metadata: {
+            capability: "project_memory",
+          },
+        })
+      }
     }
     const workspacePrompt = await WorkspaceIntelligence.renderPromptContext({
       sessionID: input.sessionID,
@@ -231,34 +736,36 @@ export namespace SessionPrompt {
         },
       })
     }
-    const knowledgeGraphPrompt = await KnowledgeContext.renderPromptContext(input.userInput, {
-      rootDir: input.rootDir,
-      graph: input.knowledgeGraph,
-    })
-    if (knowledgeGraphPrompt) {
-      prompts.push(knowledgeGraphPrompt)
-      callouts.push({
-        tool: "knowledge_graph",
-        title: "Knowledge graph context injected",
-        description:
-          "Injects ranked knowledge-graph paths and related project facts so answers can reference structural repository context instead of only raw files.",
-        output: "Injected knowledge graph context for this turn.",
-        input: {
-          query: clipCapabilityValue(input.userInput, 48),
-        },
-        metadata: {
-          capability: "knowledge_graph_context",
-        },
+    if (!input.lightweightDelegatedTurn) {
+      const knowledgeGraphPrompt = await KnowledgeContext.renderPromptContext(input.userInput, {
+        rootDir: input.rootDir,
+        graph: input.knowledgeGraph,
       })
-    }
-    const learnedStrategiesPrompt = await LearningStore.renderPromptContext({
-      projectID: input.projectID,
-      rootDir: input.rootDir,
-      taskType: input.intent?.type ?? "general",
-      complexity: input.intent?.type === "implementation" ? input.intent.complexity : input.turnControlComplexity,
-    })
-    if (learnedStrategiesPrompt) {
-      prompts.push(learnedStrategiesPrompt)
+      if (knowledgeGraphPrompt) {
+        prompts.push(knowledgeGraphPrompt)
+        callouts.push({
+          tool: "knowledge_graph",
+          title: "Knowledge graph context injected",
+          description:
+            "Injects ranked knowledge-graph paths and related project facts so answers can reference structural repository context instead of only raw files.",
+          output: "Injected knowledge graph context for this turn.",
+          input: {
+            query: clipCapabilityValue(input.userInput, 48),
+          },
+          metadata: {
+            capability: "knowledge_graph_context",
+          },
+        })
+      }
+      const learnedStrategiesPrompt = await LearningStore.renderPromptContext({
+        projectID: input.projectID,
+        rootDir: input.rootDir,
+        taskType: input.intent?.type ?? "general",
+        complexity: input.intent?.type === "implementation" ? input.intent.complexity : input.turnControlComplexity,
+      })
+      if (learnedStrategiesPrompt) {
+        prompts.push(learnedStrategiesPrompt)
+      }
     }
     const brokerContext = ToolBroker.renderPromptContext(
       ToolBroker.decide({
@@ -302,7 +809,7 @@ export namespace SessionPrompt {
         ].join("\n"),
       )
     }
-    if (input.autoGroundingSystemPrompt) {
+    if (!input.lightweightDelegatedTurn && input.autoGroundingSystemPrompt) {
       prompts.push(input.autoGroundingSystemPrompt)
     }
 
@@ -390,14 +897,251 @@ export namespace SessionPrompt {
 
   function textFromParts(parts: MessageV2.Part[]) {
     return parts
-      .filter((part): part is MessageV2.TextPart => part.type === "text")
+      .filter((part): part is MessageV2.TextPart => part.type === "text" && !part.ignored)
       .map((part) => part.text)
       .join("\n")
       .trim()
   }
 
+  function looksLikeSyntheticContinuationText(text: string) {
+    const normalized = text.toLowerCase()
+    return (
+      normalized.includes("<system-reminder>") ||
+      normalized.includes("continue autonomously") ||
+      normalized.includes("please address this message and continue with your tasks") ||
+      normalized.includes("summarize the task tool output above and continue with your task") ||
+      normalized.includes("oh-my-opencode - todo continuation") ||
+      normalized.includes("omo_internal_initiator")
+    )
+  }
+
+  function extractSelfDrivenNextActionFromStatus(currentStatus?: string) {
+    if (!currentStatus) return undefined
+    const match = currentStatus.match(/\bnextAction=(.+)$/)
+    return match?.[1] ? sanitizeAutonomousNextAction(match[1]) : undefined
+  }
+
+  /** @internal Exported for testing */
+  export function extractSelfDrivenStateFromParts(parts: MessageV2.Part[]) {
+    for (let index = parts.length - 1; index >= 0; index--) {
+      const part = parts[index]
+      if (part.type !== "tool" || part.tool !== "self_driven") continue
+      if (!isInternalCapabilityToolPart(part)) continue
+
+      const stateInput = (part.state.input ?? {}) as Record<string, unknown>
+      const metadata = (("metadata" in part.state ? part.state.metadata : undefined) ?? {}) as Record<string, unknown>
+      const hasNextRoundTask =
+        typeof stateInput?.next_round_task === "boolean"
+          ? stateInput.next_round_task
+          : typeof stateInput?.nextRoundTask === "boolean"
+            ? stateInput.nextRoundTask
+            : false
+      const currentStatus = typeof metadata?.currentStatus === "string" ? metadata.currentStatus.trim() : undefined
+      const nextAction =
+        typeof metadata?.nextAction === "string"
+          ? sanitizeAutonomousNextAction(metadata.nextAction)
+          : extractSelfDrivenNextActionFromStatus(currentStatus)
+      const remainingItems = Array.isArray(metadata?.remainingItems)
+        ? metadata.remainingItems.filter((item: unknown): item is string => typeof item === "string" && !!item.trim())
+        : []
+
+      return {
+        hasNextRoundTask,
+        currentStatus,
+        nextAction,
+        remainingItems,
+      }
+    }
+    return undefined
+  }
+
+  function extractSelfDrivenContinuationFromParts(parts: MessageV2.Part[]) {
+    const state = extractSelfDrivenStateFromParts(parts)
+    if (!state?.hasNextRoundTask) return undefined
+    return state
+  }
+
+  /** @internal Exported for testing */
+  export function buildSelfDrivenHistoryContent(parts: MessageV2.Part[]) {
+    const visibleText = textFromParts(parts)
+    const continuation = extractSelfDrivenContinuationFromParts(parts)
+    if (!continuation) return visibleText
+
+    const carryover = []
+    if (continuation.nextAction) {
+      carryover.push(`Next step: ${continuation.nextAction}`)
+    }
+    if (continuation.remainingItems.length > 0) {
+      carryover.push(`Remaining tasks:\n${continuation.remainingItems.map((item: string) => `- ${item}`).join("\n")}`)
+    }
+
+    return [visibleText, ...carryover].filter(Boolean).join("\n\n").trim()
+  }
+
   function isSyntheticPart(part: MessageV2.Part) {
     return "synthetic" in part && !!part.synthetic
+  }
+
+  /** @internal Exported for testing */
+  export function isSyntheticReminderMessage(parts: MessageV2.Part[]) {
+    if (parts.length === 0) return false
+    if (!parts.every((part) => isSyntheticPart(part))) return false
+    return parts.some(
+      (part): part is MessageV2.TextPart =>
+        part.type === "text" && typeof part.text === "string" && looksLikeSyntheticContinuationText(part.text),
+    )
+  }
+
+  function isInternalCapabilityToolPart(part: MessageV2.ToolPart) {
+    return (
+      part.metadata?.internal === true ||
+      ("metadata" in part.state && part.state.metadata?.internal === true)
+    )
+  }
+
+  function isExternalToolPart(part: MessageV2.Part) {
+    return part.type === "tool" && !isInternalCapabilityToolPart(part)
+  }
+
+  function looksLikeAutonomousToolPreambleText(text: string) {
+    const normalized = text.replace(/\s+/g, " ").trim()
+    if (!normalized || normalized.length > 320) return false
+
+    const actionLeadIn =
+      /(?:^|\b)(?:let me|i(?:'ll| will)|now i(?: have| can)?|running|fixing|editing|reading|checking|patching|updating|rerunning|applying|verifying|现在|我先|先|接下来|继续|正在)/iu
+    const actionableVerb =
+      /(?:\b(?:fix|edit|read|run|rerun|verify|apply|patch|update|check|inspect|search)\b|修复|编辑|读取|运行|重跑|验证|应用|更新|检查|搜索)/iu
+    const statusLeadIn =
+      /(?:^|\b)(?:all\s+\d+\b.*\bfixed\b|fixed\b|done\b|diagnostics are stale|i have all the exact strings|i have the exact strings)/i
+
+    return (/[：:]$/.test(normalized) || actionLeadIn.test(normalized)) && (actionableVerb.test(normalized) || statusLeadIn.test(normalized))
+  }
+
+  /** @internal Exported for testing */
+  export function suppressAutonomousToolPreambleParts(input: {
+    syntheticReminderLoop: boolean
+    parts: MessageV2.Part[]
+  }) {
+    if (!input.syntheticReminderLoop) return [] as MessageV2.TextPart[]
+
+    const firstExternalToolIndex = input.parts.findIndex(isExternalToolPart)
+    if (firstExternalToolIndex < 0) return [] as MessageV2.TextPart[]
+
+    const suppressed: MessageV2.TextPart[] = []
+    for (let index = 0; index < firstExternalToolIndex; index++) {
+      const part = input.parts[index]
+      if (part.type !== "text" || part.synthetic || part.ignored) continue
+      if (!looksLikeAutonomousToolPreambleText(part.text)) continue
+      part.ignored = true
+      suppressed.push(part)
+    }
+
+    return suppressed
+  }
+
+  /** @internal Exported for testing */
+  export function isNoOpUnknownAssistantTurn(input: {
+    finish?: MessageV2.Assistant["finish"]
+    parts: MessageV2.Part[]
+  }) {
+    if (input.finish !== "unknown") return false
+    if (input.parts.length === 0) return true
+
+    return input.parts.every((part) => {
+      if (part.type === "step-start" || part.type === "step-finish") return true
+      if (part.type === "tool") return isInternalCapabilityToolPart(part)
+      if (part.type === "text") return part.text.trim().length === 0
+      if (part.type === "reasoning") return part.text.replaceAll("[REDACTED]", "").trim().length === 0
+      return false
+    })
+  }
+
+  function looksLikeAutonomousWrapUpSummary(text: string) {
+    const normalized = text.toLowerCase()
+    const wrapUpMarkers = [
+      "summary of work completed",
+      "work completed summary",
+      "summary of work accomplished",
+      "accomplished tasks",
+    ]
+    const handoffMarkers = ["remaining tasks", "exact next step", "recommendations"]
+
+    const tersePhaseCompleteSummary = /phase\s+\d+\s+complete\b/i.test(text)
+    const terseTaskBatchCompleteSummary = /\bw\d+-t\d+(?:\/t\d+)*\s+complete\b/i.test(text)
+    const terseHandoffMarkers = ["next:", "next round:", "next action:", "下一步：", "接下来："]
+    const terseBlockedHandoff =
+      (tersePhaseCompleteSummary || terseTaskBatchCompleteSummary) &&
+      /\bblocked\b/i.test(text) &&
+      /(?:\bmust\b|\brequires?\b|\bfirst\b|\bthen\b|`read`|`edit`|re-reading)/i.test(text)
+    const conciseProgressHandoff =
+      /(?:^|\b)(?:applied|updated|edited|patched|fixed)\b/i.test(text) &&
+      terseHandoffMarkers.some((marker) => normalized.includes(marker)) &&
+      /(?:\bnot yet (?:applied|done|completed|finished)\b|step boundary reached\b)/i.test(text)
+
+    return (
+      (wrapUpMarkers.some((marker) => normalized.includes(marker)) && handoffMarkers.some((marker) => normalized.includes(marker))) ||
+      ((tersePhaseCompleteSummary || terseTaskBatchCompleteSummary) && terseHandoffMarkers.some((marker) => normalized.includes(marker))) ||
+      terseBlockedHandoff ||
+      conciseProgressHandoff
+    )
+  }
+
+  /** @internal Exported for testing */
+  export function isAutonomousStopHandoffAssistantTurn(input: {
+    finish?: MessageV2.Assistant["finish"]
+    parts: MessageV2.Part[]
+  }) {
+    if (!input.finish || ["tool-calls", "unknown"].includes(input.finish)) return false
+    return looksLikeAutonomousWrapUpSummary(textFromParts(input.parts))
+  }
+
+  /** @internal Exported for testing */
+  export function compactSyntheticResumeAssistantText(input: {
+    syntheticReminderLoop: boolean
+    assistantText: string
+  }) {
+    if (!input.syntheticReminderLoop) return input.assistantText
+    if (!looksLikeAutonomousWrapUpSummary(input.assistantText)) return input.assistantText
+
+    return [
+      "Previous round ended with a rollover handoff summary.",
+      "Treat that summary as completed context only.",
+      "Continue from the current synthetic reminder and execute the next action instead of repeating the prior summary.",
+    ].join(" ")
+  }
+
+  function compactSyntheticResumeAssistantMessage(input: {
+    syntheticReminderLoop: boolean
+    message?: Pick<MessageV2.WithParts, "parts">
+  }) {
+    if (!input.message) return
+
+    const originalText = textFromParts(input.message.parts)
+    if (!originalText) return
+
+    const compacted = compactSyntheticResumeAssistantText({
+      syntheticReminderLoop: input.syntheticReminderLoop,
+      assistantText: originalText,
+    })
+    if (compacted === originalText) return
+
+    let replaced = false
+    for (const part of input.message.parts) {
+      if (part.type !== "text") continue
+      if (!replaced) {
+        part.text = compacted
+        replaced = true
+        continue
+      }
+      part.text = ""
+    }
+  }
+
+  function historyForSelfDriven(messages: Array<Pick<MessageV2.WithParts, "info" | "parts">>): AgentContext["history"] {
+    return messages.map((message) => ({
+      role: message.info.role === "assistant" ? "assistant" : message.info.role === "user" ? "user" : "tool",
+      content: message.info.role === "assistant" ? buildSelfDrivenHistoryContent(message.parts) : textFromParts(message.parts),
+    }))
   }
 
   /** @internal Exported for testing */
@@ -421,8 +1165,8 @@ export namespace SessionPrompt {
   }
 
   async function emitCapabilityCallout(input: {
-    sessionID: string
-    messageID: string
+    sessionID: SessionID
+    messageID: MessageID
     callout: RuntimeCapabilityCallout
   }) {
     const started = Date.now()
@@ -452,13 +1196,13 @@ export namespace SessionPrompt {
   }
 
   async function createInternalAssistantMessage(input: {
-    sessionID: string
-    parentID: string
+    sessionID: SessionID
+    parentID: MessageID
     agent: string
     variant?: string
     model: {
-      providerID: string
-      modelID: string
+      providerID: ProviderID
+      modelID: ModelID
     }
   }) {
     return (await Session.updateMessage({
@@ -747,10 +1491,11 @@ export namespace SessionPrompt {
     const verificationRevisionCount = new Map<string, number>()
 
     let step = 0
+    let autonomousRoundBaseStep = 0
     const session = await Session.get(sessionID)
     while (true) {
       SessionStatus.set(sessionID, { type: "busy" })
-      log.info("loop", { step, sessionID })
+      log.info("loop", { step, roundStep: Math.max(0, step - autonomousRoundBaseStep), sessionID })
       if (abort.aborted) break
       let msgs = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
       const capabilityCallouts: RuntimeCapabilityCallout[] = []
@@ -758,6 +1503,7 @@ export namespace SessionPrompt {
       let lastUser: MessageV2.User | undefined
       let lastUserParts: MessageV2.Part[] = []
       let lastAssistant: MessageV2.Assistant | undefined
+      let lastAssistantParts: MessageV2.Part[] = []
       let lastFinished: MessageV2.Assistant | undefined
       let tasks: (MessageV2.CompactionPart | MessageV2.SubtaskPart)[] = []
       for (let i = msgs.length - 1; i >= 0; i--) {
@@ -766,7 +1512,10 @@ export namespace SessionPrompt {
           lastUser = msg.info as MessageV2.User
           lastUserParts = msg.parts
         }
-        if (!lastAssistant && msg.info.role === "assistant") lastAssistant = msg.info as MessageV2.Assistant
+        if (!lastAssistant && msg.info.role === "assistant") {
+          lastAssistant = msg.info as MessageV2.Assistant
+          lastAssistantParts = msg.parts
+        }
         if (!lastFinished && msg.info.role === "assistant" && msg.info.finish)
           lastFinished = msg.info as MessageV2.Assistant
         if (lastUser && lastFinished) break
@@ -778,13 +1527,18 @@ export namespace SessionPrompt {
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
 
+      const delegatedTurnFastPath = shouldUseDelegatedTurnFastPath({
+        parentID: session.parentID,
+        hasAssistant: !!lastAssistant,
+      })
+
       const turnUserContext = resolveTurnUserContext({ history: msgs })
       if (!turnUserContext) throw new Error("No non-synthetic user message found in stream. This should never happen.")
 
       if (turnUserContext.userID !== autoGroundingUserID) {
         autoGroundingUserID = turnUserContext.userID
         autoGroundingSystemPrompt = undefined
-        const query = extractAutoGroundingQueryFromParts(turnUserContext.parts)
+        const query = delegatedTurnFastPath ? "" : extractAutoGroundingQueryFromParts(turnUserContext.parts)
         const grounding = query
           ? await buildAutoGroundingContext({
               query,
@@ -862,16 +1616,18 @@ export namespace SessionPrompt {
           prompt: turnUserInput,
           intent: detectedIntent,
         })
-        await ProjectMemory.rememberPromptConstraints(session.projectID, turnUserInput)
-        await LearningStore.startTask(
-          {
-            projectID: session.projectID,
-            rootDir: Instance.project.worktree,
-            taskType: detectedIntent.type,
-            complexity: learningComplexity,
-          },
-          [detectedIntent.type],
-        )
+        if (!delegatedTurnFastPath) {
+          await ProjectMemory.rememberPromptConstraints(session.projectID, turnUserInput)
+          await LearningStore.startTask(
+            {
+              projectID: session.projectID,
+              rootDir: Instance.project.worktree,
+              taskType: detectedIntent.type,
+              complexity: learningComplexity,
+            },
+            [detectedIntent.type],
+          )
+        }
         capabilityCallouts.push({
           tool: "workflow",
           title: "Structured workflow initialized",
@@ -891,6 +1647,39 @@ export namespace SessionPrompt {
 
       // Defer sdAgent.initialize() to after model is resolved so we can pass Provider.Model
 
+      const lastAssistantNoOpUnknown =
+        !!lastAssistant &&
+        lastUser.id < lastAssistant.id &&
+        isNoOpUnknownAssistantTurn({
+          finish: lastAssistant.finish,
+          parts: lastAssistantParts,
+        })
+
+      if (lastAssistantNoOpUnknown) {
+        const recovered = await recoverNoOpUnknownAssistantTurn({
+          sessionID,
+          history: msgs,
+          lastUser,
+          lastUserParts,
+          assistantParts: lastAssistantParts,
+          assistantID: lastAssistant?.id,
+          step,
+          logLabel: "recovering persisted no-op unknown-finish assistant loop",
+        })
+        if (recovered) {
+          autonomousRoundBaseStep = step
+          continue
+        }
+
+        log.info("terminating no-op unknown-finish assistant loop", {
+          sessionID,
+          step,
+          assistantID: lastAssistant?.id,
+        })
+        void WorkflowOrchestrator.complete(sessionID).catch(() => undefined)
+        break
+      }
+
       const shouldExit =
         lastAssistant?.finish &&
         !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
@@ -900,12 +1689,50 @@ export namespace SessionPrompt {
         // Check for pending todos
         const todos = await Todo.get(sessionID)
         const hasPending = todos.some((t) => t.status === "pending" || t.status === "in_progress")
+        const syntheticReminderLoop = isSyntheticReminderMessage(lastUserParts)
+        const continuationState = await sdAgent.getAutonomousContinuationState(historyForSelfDriven(msgs))
+        const remainingWork = continuationState.remainingWork
+        const nextTodo = todos.find((t) => t.status === "in_progress") || todos.find((t) => t.status === "pending")
+        const stopHandoffLoop = isAutonomousStopHandoffAssistantTurn({
+          finish: lastAssistant!.finish,
+          parts: lastAssistantParts,
+        })
+        const repeatingSelfDrivenHandoff =
+          stopHandoffLoop && syntheticReminderLoop && isSelfDrivenContinuationReminderMessage(lastUserParts)
+        const repeatingTodoHandoff =
+          stopHandoffLoop && syntheticReminderLoop && isTodoContinuationReminderMessage(lastUserParts)
 
-        if (hasPending) {
+        if (repeatingTodoHandoff) {
+          log.info("stopping repeated todo reminder stop handoff loop", {
+            sessionID,
+            assistantID: lastAssistant!.id,
+            nextTodo: nextTodo?.content,
+          })
+
+          await emitVisibleStopHandoffStallNotice({
+            sessionID,
+            parentID: lastUser.id,
+            agent: lastUser.agent,
+            variant: lastUser.variant,
+            model: lastUser.model,
+            nextTodo: nextTodo?.content,
+          })
+
+          void WorkflowOrchestrator.complete(sessionID).catch(() => undefined)
+          break
+        }
+
+        const resumeMode = getStopHandoffResumeMode({
+          syntheticReminderLoop,
+          repeatingSelfDrivenHandoff,
+          hasPendingTodos: hasPending,
+          hasNextRoundTask: continuationState.hasNextRoundTask,
+        })
+
+        if (resumeMode === "todo") {
           log.info("pending todos found, continuing loop", { sessionID })
 
           // Create synthetic user message to nudge the agent
-          const nextTodo = todos.find((t) => t.status === "in_progress") || todos.find((t) => t.status === "pending")
           const reminder = nextTodo
             ? `You have pending items in your todo list. The next task is: "${nextTodo.content}". Please proceed.`
             : "You have pending items in your todo list. Please proceed to the next task."
@@ -957,16 +1784,28 @@ export namespace SessionPrompt {
             synthetic: true,
           })
 
+          autonomousRoundBaseStep = step
+
           continue
         }
 
         // Check for Self-Driven Agent remaining work
-        const remainingWork = sdAgent.detectRemainingWork()
-        if (remainingWork.hasRemaining && remainingWork.progress < 1.0) {
-           log.info("self-driven agent has remaining work", { sessionID, remaining: remainingWork.items })
-           
-           const nextAction = remainingWork.suggestedActions[0] || "Continue with the next step."
-           const reminder = `Self-Correction: You still have incomplete goals. \nRemaining items: ${remainingWork.items.join(", ")}. \nSuggested action: ${nextAction}`
+        if (resumeMode === "self_driven") {
+           log.info("self-driven agent has next-round task", {
+            sessionID,
+            remaining: remainingWork.items,
+            carryover: continuationState.carryoverSegments.map((segment) => segment.keyword),
+           })
+
+           const nextAction =
+             continuationState.suggestedNextAction ||
+             remainingWork.suggestedActions[0] ||
+             "Continue with the next step from the previous round."
+           const reminder = buildSelfDrivenContinuationDirective({
+            currentStatus: continuationState.currentStatus,
+            nextAction,
+            remainingItems: remainingWork.items,
+           })
 
            const capabilityMessage = await createInternalAssistantMessage({
             sessionID,
@@ -982,16 +1821,21 @@ export namespace SessionPrompt {
               tool: "self_correction",
               title: "Self-correction resumed work",
               description:
-                "Uses the self-driven agent's remaining-work check to resume the loop when goals are still incomplete.",
-              output: `Remaining work detected at ${formatCapabilityProgress(remainingWork.progress)} progress.`,
+                "Uses the self-driven agent's previous-round next-step extraction and remaining-work state to decide whether to continue autonomously.",
+              output: `Current status: ${continuationState.currentStatus}`,
               input: {
                 remaining: remainingWork.items.length,
                 progress: formatCapabilityProgress(remainingWork.progress),
                 next_action: clipCapabilityValue(nextAction, 48),
+                carryover_segments: continuationState.carryoverSegments.length,
+                next_round_task: continuationState.hasNextRoundTask,
               },
               metadata: {
                 capability: "self_correction",
                 remainingItems: remainingWork.items,
+                currentStatus: continuationState.currentStatus,
+                carryoverSegmentCount: continuationState.carryoverSegments.length,
+                nextAction,
               },
             },
           })
@@ -1013,6 +1857,8 @@ export namespace SessionPrompt {
             text: `<system-reminder>${reminder}</system-reminder>`,
             synthetic: true,
           })
+
+          autonomousRoundBaseStep = step
 
           continue
         }
@@ -1051,10 +1897,7 @@ export namespace SessionPrompt {
         await sdAgent.initialize({
           userInput: turnUserInput,
           intent: turnIntent!,
-          history: msgs.map((m) => ({
-            role: m.info.role === "assistant" ? "assistant" : m.info.role === "user" ? "user" : "tool",
-            content: m.parts.filter((p) => p.type === "text").map((p) => (p as MessageV2.TextPart).text).join("\n"),
-          })),
+          history: historyForSelfDriven(msgs),
           model,
           sessionID,
         })
@@ -1259,13 +2102,21 @@ export namespace SessionPrompt {
         lastFinished.summary !== true &&
         (await SessionCompaction.isOverflow({ sessionID, tokens: lastFinished.tokens, model }))
       ) {
-        await SessionCompaction.create({
+        const optimizedContext = buildOptimizedModelContext(msgs, model)
+        const stillOverflowsAfterCleanup = await SessionCompaction.isEstimatedOverflow({
           sessionID,
-          agent: lastUser.agent,
-          model: lastUser.model,
-          auto: true,
+          estimatedInputTokens: optimizedContext.stats.estimatedTokensAfter,
+          model,
         })
-        continue
+        if (stillOverflowsAfterCleanup) {
+          await SessionCompaction.create({
+            sessionID,
+            agent: lastUser.agent,
+            model: lastUser.model,
+            auto: true,
+          })
+          continue
+        }
       }
 
       // normal processing
@@ -1276,6 +2127,7 @@ export namespace SessionPrompt {
         lastFinished,
         turnController,
         step,
+        roundBaseStep: autonomousRoundBaseStep,
         maxSteps,
       })
       msgs = await insertReminders({
@@ -1283,6 +2135,17 @@ export namespace SessionPrompt {
         agent,
         session,
       })
+      const syntheticReminderLoop = isSyntheticReminderMessage(lastUserParts)
+      if (syntheticReminderLoop) {
+        const previousAssistant = msgs.findLast(
+          (message) => message.info.role === "assistant" && message.info.id < lastUser.id,
+        )
+        compactSyntheticResumeAssistantMessage({
+          syntheticReminderLoop,
+          message: previousAssistant,
+        })
+      }
+      const optimizedContext = buildOptimizedModelContext(msgs, model)
 
       const processor = SessionProcessor.create({
         assistantMessage: (await Session.updateMessage({
@@ -1321,27 +2184,6 @@ export namespace SessionPrompt {
           sessionID,
           messageID: processor.message.id,
           callout,
-        })
-      }
-
-      if (turnDecision && !turnDecision.shouldContinue) {
-        await emitCapabilityCallout({
-          sessionID,
-          messageID: processor.message.id,
-          callout: {
-            tool: "turn_control",
-            title: "Turn controller requested wrap-up",
-            description:
-              "Applies the loop boundary heuristic to decide when the agent should wrap up instead of starting more tool work.",
-            output: `Wrap-up recommended: ${turnDecision.reason}`,
-            input: {
-              decision: "wrap_up",
-              reason: clipCapabilityValue(turnDecision.reason),
-            },
-            metadata: {
-              capability: "dynamic_turn_control",
-            },
-          },
         })
       }
 
@@ -1417,16 +2259,22 @@ export namespace SessionPrompt {
         agent,
         toolDescriptors: toolDescriptorsFromResolvedTools(tools),
         autoGroundingSystemPrompt,
+        lightweightDelegatedTurn: delegatedTurnFastPath,
       })
       system.push(capabilitySystemPrompts.personalityPrompt)
-      for (const callout of capabilitySystemPrompts.callouts) {
-        await emitCapabilityCallout({
-          sessionID,
-          messageID: processor.message.id,
-          callout,
-        })
-      }
-      if (turnDecision && !turnDecision.shouldContinue) {
+
+      // Inject Self-Driven Agent Context
+      const thinkingResult = await sdAgent.onBeforeLLMCall(historyForSelfDriven(msgs))
+      const wfState = await WorkflowOrchestrator.get(sessionID)
+      const planClarificationQuestions = wfState?.plan.clarificationQuestions ?? []
+      const shouldPauseForPlanClarification = step === 0 && planClarificationQuestions.length > 0
+      const shouldPauseForClarification = !!thinkingResult.promptGuidance || shouldPauseForPlanClarification
+      const shouldWrapUp = shouldEnforceTurnWrapUp({
+        turnDecision,
+        hasNextRoundTask: thinkingResult.status.hasNextRoundTask,
+      })
+      const shouldGateToolUse = format.type !== "json_schema" && (shouldPauseForClarification || shouldWrapUp)
+      if (shouldWrapUp && turnDecision) {
         turnControlReminderSent = true
         system.push(
           [
@@ -1439,15 +2287,26 @@ export namespace SessionPrompt {
       } else {
         turnControlReminderSent = false
       }
-
-      // Inject Self-Driven Agent Context
-      const thinkingResult = await sdAgent.onBeforeLLMCall()
-      const wfState = await WorkflowOrchestrator.get(sessionID)
-      const planClarificationQuestions = wfState?.plan.clarificationQuestions ?? []
-      const shouldPauseForPlanClarification = step === 0 && planClarificationQuestions.length > 0
-      const shouldPauseForClarification = !!thinkingResult.promptGuidance || shouldPauseForPlanClarification
-      const shouldGateToolUse =
-        format.type !== "json_schema" && (shouldPauseForClarification || turnDecision?.shouldContinue === false)
+      if (shouldWrapUp && turnDecision) {
+        await emitCapabilityCallout({
+          sessionID,
+          messageID: processor.message.id,
+          callout: {
+            tool: "turn_control",
+            title: "Turn controller requested wrap-up",
+            description:
+              "Applies the loop boundary heuristic to decide when the agent should wrap up instead of starting more tool work.",
+            output: `Wrap-up recommended: ${turnDecision.reason}`,
+            input: {
+              decision: "wrap_up",
+              reason: clipCapabilityValue(turnDecision.reason),
+            },
+            metadata: {
+              capability: "dynamic_turn_control",
+            },
+          },
+        })
+      }
       await emitCapabilityCallout({
         sessionID,
         messageID: processor.message.id,
@@ -1456,7 +2315,7 @@ export namespace SessionPrompt {
           title: "Self-driven state prepared",
           description:
             "Prepares self-driven loop state before the next model call, including the current phase, progress, and active goals.",
-          output: "Prepared self-driven context for the next model call.",
+          output: `Prepared self-driven context for the next model call. Current status: ${thinkingResult.status.currentStatus}`,
           input: {
             phase: String(thinkingResult.enhancedContext.agentPhase ?? "unknown"),
             progress: formatCapabilityProgress(thinkingResult.enhancedContext.goalProgress),
@@ -1464,15 +2323,45 @@ export namespace SessionPrompt {
               ? thinkingResult.enhancedContext.activeGoals.length
               : 0,
             guidance: !!thinkingResult.promptGuidance,
+            next_round_task: thinkingResult.status.hasNextRoundTask,
+            carryover_segments: thinkingResult.status.carryoverSegments.length,
           },
           metadata: {
             capability: "self_driven_agent",
+            currentStatus: thinkingResult.status.currentStatus,
+            stopReason: thinkingResult.status.stopReason,
+            nextAction: thinkingResult.status.suggestedNextAction,
+            remainingItems: thinkingResult.status.remainingWork.items,
           },
         },
       })
       if (thinkingResult.enhancedContext) {
         const contextStr = JSON.stringify(thinkingResult.enhancedContext, null, 2)
         system.push(`\n<agent_state>\n${contextStr}\n</agent_state>\n`)
+      }
+      system.push(`\n<self_driven_status>\n${thinkingResult.status.currentStatus}\n</self_driven_status>\n`)
+      if (thinkingResult.status.hasNextRoundTask) {
+        system.push(
+          [
+            "<self_driven_resume>",
+            buildSelfDrivenContinuationDirective({
+              currentStatus: thinkingResult.status.currentStatus,
+              nextAction: thinkingResult.status.suggestedNextAction,
+              remainingItems: thinkingResult.status.remainingWork.items,
+            }),
+            "</self_driven_resume>",
+          ].join("\n"),
+        )
+      }
+      if (!thinkingResult.status.hasNextRoundTask && thinkingResult.status.stopReason) {
+        system.push(
+          [
+            "<self_driven_stop>",
+            thinkingResult.status.stopReason,
+            "Do not invent another autonomous next step. If the user has not requested more work, wrap up instead of continuing the loop.",
+            "</self_driven_stop>",
+          ].join("\n"),
+        )
       }
       if (thinkingResult.promptGuidance) {
         system.push(`\n<guidance>\n${thinkingResult.promptGuidance}\n</guidance>\n`)
@@ -1527,12 +2416,14 @@ export namespace SessionPrompt {
         sessionID,
         system,
         messages: [
-          ...MessageV2.toModelMessages(msgs, model),
+          ...optimizedContext.messages,
           ...(isLastStep
             ? [
                 {
                   role: "assistant" as const,
-                  content: MAX_STEPS,
+                  content: getMaxStepPrompt({
+                    hasNextRoundTask: thinkingResult.status.hasNextRoundTask,
+                  }),
                 },
               ]
             : []),
@@ -1551,8 +2442,30 @@ export namespace SessionPrompt {
         break
       }
 
-      // Check if model finished (finish reason is not "tool-calls" or "unknown")
-      const modelFinished = processor.message.finish && !["tool-calls", "unknown"].includes(processor.message.finish)
+      const assistantParts = await MessageV2.parts(processor.message.id)
+      const suppressedAutonomousPreambles = suppressAutonomousToolPreambleParts({
+        syntheticReminderLoop,
+        parts: assistantParts,
+      })
+      for (const part of suppressedAutonomousPreambles) {
+        await Session.updatePart(part)
+      }
+      if (suppressedAutonomousPreambles.length > 0) {
+        log.info("suppressed autonomous tool preamble text", {
+          sessionID,
+          step,
+          assistantID: processor.message.id,
+          parts: suppressedAutonomousPreambles.length,
+        })
+      }
+      const noOpUnknownAssistantTurn = isNoOpUnknownAssistantTurn({
+        finish: processor.message.finish,
+        parts: assistantParts,
+      })
+
+      // Check if model finished, including the empty unknown-finish guard.
+      const modelFinished =
+        processor.message.finish && (!(["tool-calls", "unknown"].includes(processor.message.finish)) || noOpUnknownAssistantTurn)
 
       if (modelFinished && !processor.message.error) {
         if (format.type === "json_schema") {
@@ -1565,14 +2478,20 @@ export namespace SessionPrompt {
           break
         }
 
-        const assistantParts = await MessageV2.parts(processor.message.id)
         const assistantText = textFromParts(assistantParts)
         const verificationIntent = resolveVerificationIntent({
           intent: turnIntent,
           userInput: turnUserInput,
           assistantText,
         })
-        if (assistantText && shouldRunAnswerVerification({ intent: verificationIntent })) {
+        if (
+          assistantText &&
+          shouldRunAnswerVerification({
+            intent: verificationIntent,
+            syntheticReminderLoop,
+            hasNextRoundTask: thinkingResult.status.hasNextRoundTask,
+          })
+        ) {
           const verification = await verifyWithFVA(assistantText, turnUserInput || assistantText, {
             projectId: session.projectID,
             maxClaims: 3,
@@ -1677,28 +2596,58 @@ export namespace SessionPrompt {
         }
       }
 
+      if (noOpUnknownAssistantTurn) {
+        const recovered = await recoverNoOpUnknownAssistantTurn({
+          sessionID,
+          history: msgs,
+          lastUser,
+          lastUserParts,
+          assistantParts,
+          assistantID: processor.message.id,
+          step,
+          logLabel: "recovering immediate no-op unknown-finish assistant turn",
+        })
+        if (recovered) {
+          continue
+        }
+
+        log.info("stopping immediate no-op unknown-finish assistant turn", { sessionID, step, assistantID: processor.message.id })
+        void WorkflowOrchestrator.complete(sessionID).catch(() => undefined)
+        break
+      }
+
       if (result === "stop") break
       turnController.record(!processor.message.error, tokenUsage(processor.message.tokens))
       if (result === "compact") {
-        await SessionCompaction.create({
-          sessionID,
-          agent: lastUser.agent,
-          model: lastUser.model,
-          auto: true,
-          overflow: !processor.message.finish,
+        const refreshedMessages = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
+        const postTurnContextTokens = estimatePostTurnCompactionTokens({
+          messages: refreshedMessages,
+          model,
+          providerInputTokens: tokenUsage(processor.message.tokens).input,
         })
+        const stillOverflowsAfterCleanup = await SessionCompaction.isEstimatedOverflow({
+          sessionID,
+          estimatedInputTokens: postTurnContextTokens,
+          model,
+        })
+        if (stillOverflowsAfterCleanup) {
+          await SessionCompaction.create({
+            sessionID,
+            agent: lastUser.agent,
+            model: lastUser.model,
+            auto: true,
+            overflow: !processor.message.finish,
+          })
+        }
       }
       continue
     }
-    SessionCompaction.prune({ sessionID })
-    for await (const item of MessageV2.stream(sessionID)) {
-      if (item.info.role === "user") continue
-      const queued = getState()[sessionID]?.callbacks ?? []
-      for (const q of queued) {
-        q.resolve(item)
-      }
-      return item
+    const item = await loadFinalAssistantMessage(sessionID)
+    const queued = getState()[sessionID]?.callbacks ?? []
+    for (const q of queued) {
+      q.resolve(item)
     }
+    return item
     throw new Error("Impossible")
   })
 
@@ -3123,3 +4072,55 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     }
   }
 }
+
+  async function emitVisibleStopHandoffStallNotice(input: {
+    sessionID: SessionID
+    parentID: MessageID
+    agent: string
+    variant?: string
+    model: {
+      providerID: ProviderID
+      modelID: ModelID
+    }
+    nextTodo?: string
+  }) {
+    const assistantMessage = (await Session.updateMessage({
+      id: MessageID.ascending(),
+      parentID: input.parentID,
+      role: "assistant",
+      mode: input.agent,
+      agent: input.agent,
+      variant: input.variant,
+      path: {
+        cwd: Instance.directory,
+        root: Instance.worktree,
+      },
+      cost: 0,
+      tokens: {
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+      modelID: input.model.modelID,
+      providerID: input.model.providerID,
+      finish: "stop",
+      time: {
+        created: Date.now(),
+        completed: Date.now(),
+      },
+      sessionID: input.sessionID,
+    })) as MessageV2.Assistant
+
+    await Session.updatePart({
+      id: PartID.ascending(),
+      messageID: assistantMessage.id,
+      sessionID: input.sessionID,
+      type: "text",
+      text: [
+        "Autonomous continuation stalled after repeated rollover handoff responses.",
+        input.nextTodo ? `The active todo is still pending: \"${input.nextTodo}\".` : "Todo work is still pending.",
+        "Stopping this retry loop so the session does not keep repeating the same stop summary.",
+      ].join("\n"),
+    })
+  }

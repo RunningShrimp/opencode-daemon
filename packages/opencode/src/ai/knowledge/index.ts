@@ -49,6 +49,7 @@ export class KnowledgeGraph {
   private version = 0
   private syncedVersion = -1
   private syncTask?: Promise<void>
+  private pendingSyncs = new Map<string, { snapshot: { nodes?: KnowledgeNode[]; edges?: KnowledgeEdge[] }; version: number }>()
 
   constructor() {
     this.snapshotCache = CacheStrategyFactory.createCache<{ nodes?: KnowledgeNode[]; edges?: KnowledgeEdge[] }>({
@@ -56,6 +57,7 @@ export class KnowledgeGraph {
       kind: "graph",
       maxSize: 256,
       ttl: 30 * 24 * 60 * 60 * 1000,
+      // Keep JSON backup while enabling SochDB as the primary persistent backend.
       sochNamespace: `knowledge-snapshot-${cacheSegment(this.backupDir)}`,
       jsonDir: this.backupDir,
     })
@@ -426,26 +428,43 @@ export class KnowledgeGraph {
     snapshot = this.createSnapshot(),
     version = this.version,
   ) {
-    const backupTask = this.snapshotCache.set(projectId, snapshot).catch((error) => {
-      log.warn("knowledge graph backup sync failed", { projectId, error: String(error) })
-    })
+    this.pendingSyncs.set(projectId, { snapshot, version })
+    if (this.syncTask) return
 
-    if (!this.persistenceSettled || this.syncTask) return
-    this.syncTask = (async () => {
-      await backupTask
-      if (projectId === this.activeProjectId) {
-        this.syncedVersion = version
-      }
-    })()
+    this.syncTask = this.flushSyncQueue()
       .catch((error) => {
         log.warn("knowledge graph sync failed", { error: String(error) })
       })
       .finally(() => {
         this.syncTask = undefined
-        if (projectId === this.activeProjectId && this.syncedVersion < this.version) {
+        if (this.pendingSyncs.size > 0) {
           this.queueSync()
         }
       })
+  }
+
+  private async flushSyncQueue() {
+    while (this.pendingSyncs.size > 0) {
+      const pending = Array.from(this.pendingSyncs.entries())
+      this.pendingSyncs.clear()
+
+      for (const [projectId, entry] of pending) {
+        await this.snapshotCache.set(projectId, entry.snapshot).catch((error) => {
+          log.warn("knowledge graph backup sync failed", { projectId, error: String(error) })
+        })
+
+        if (this.persistenceSettled && projectId === this.activeProjectId) {
+          this.syncedVersion = Math.max(this.syncedVersion, entry.version)
+        }
+      }
+    }
+
+    if (this.persistenceSettled && this.syncedVersion < this.version) {
+      this.pendingSyncs.set(this.activeProjectId, {
+        snapshot: this.createSnapshot(),
+        version: this.version,
+      })
+    }
   }
 }
 

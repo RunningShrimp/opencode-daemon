@@ -1,8 +1,14 @@
-import { SelfDrivingLoop, type SelfDrivingConfig, DEFAULT_SELF_DRIVING_CONFIG } from "./self-driving-loop"
+import {
+  SelfDrivingLoop,
+  type SelfDrivingConfig,
+  type RemainingWorkReport,
+  DEFAULT_SELF_DRIVING_CONFIG,
+} from "./self-driving-loop"
 import type { TaskIntent } from "./intent"
 import { IntentDetection } from "./intent"
 import type { Provider } from "@/provider/provider"
 import { OpencodeLLMAdapter } from "./llm-adapter"
+import { analyzeSemanticContinuation } from "./continuation-semantics"
 
 export interface SelfDrivenAgentConfig {
   selfDriving: SelfDrivingConfig
@@ -23,11 +29,59 @@ export interface AgentContext {
 export interface BeforeLLMResult {
   enhancedContext: Record<string, unknown>
   promptGuidance?: string
+  status: SelfDrivenContinuationState
 }
 
 export interface AfterToolResult {
   shouldReflect: boolean
   adaptation?: string
+}
+
+export interface SelfDrivenCarryoverSegment {
+  keyword: string
+  text: string
+}
+
+export interface SelfDrivenContinuationState {
+  remainingWork: RemainingWorkReport
+  carryoverSegments: SelfDrivenCarryoverSegment[]
+  hasNextRoundTask: boolean
+  stopReason?: string
+  suggestedNextAction?: string
+  currentStatus: string
+}
+
+function normalizeHistoryText(text: string) {
+  return text.replace(/\r\n/g, "\n").trim()
+}
+
+function getLatestAssistantContent(history?: AgentContext["history"]) {
+  const assistantMessages = history
+    ?.filter((entry) => entry.role === "assistant")
+    .map((entry) => normalizeHistoryText(entry.content))
+    .filter(Boolean)
+
+  return assistantMessages?.at(-1)
+}
+
+function formatContinuationStatus(input: {
+  phase: string
+  progress: number
+  remainingCount: number
+  carryoverCount: number
+  hasNextRoundTask: boolean
+  nextAction?: string
+}) {
+  const progress = Number.isFinite(input.progress) ? `${Math.round(input.progress * 100)}%` : "unknown"
+  const parts = [
+    `phase=${input.phase}`,
+    `progress=${progress}`,
+    `remaining=${input.remainingCount}`,
+    `carryover=${input.carryoverCount}`,
+    `nextRoundTask=${input.hasNextRoundTask ? "yes" : "no"}`,
+  ]
+  if (input.nextAction) parts.push(`nextAction=${input.nextAction}`)
+  return parts.join(" | ")
 }
 
 export class SelfDrivenAgent {
@@ -57,9 +111,46 @@ export class SelfDrivenAgent {
     this.initialized = true
   }
 
-  async onBeforeLLMCall(): Promise<BeforeLLMResult> {
+  async getAutonomousContinuationState(history?: AgentContext["history"]): Promise<SelfDrivenContinuationState> {
     const state = this.loop.getCurrentState()
+    const remainingWork = this.loop.detectRemainingWork()
+    const latestAssistant = getLatestAssistantContent(history)
+    const semanticAnalysis = await analyzeSemanticContinuation(latestAssistant)
+    const carryoverSegments = semanticAnalysis.carryoverSegments.map((segment) => ({
+      keyword: segment.label,
+      text: segment.text,
+    }))
+    const hasCarryoverTask = !semanticAnalysis.rolloverHandoff && carryoverSegments.length > 0
+    const hasNextRoundTask = remainingWork.hasRemaining || hasCarryoverTask
+    const nextAction =
+      carryoverSegments.find((segment) => segment.keyword === "next_step")?.text ||
+      carryoverSegments[0]?.text ||
+      remainingWork.suggestedActions[0]
 
+    return {
+      remainingWork,
+      carryoverSegments,
+      hasNextRoundTask,
+      stopReason: hasNextRoundTask
+        ? undefined
+        : semanticAnalysis.rolloverHandoff
+          ? "Latest assistant response was a rollover handoff summary, not a new next-round task."
+        : semanticAnalysis.explicitStop
+          ? "Latest assistant response indicates there is no next-round task."
+          : "No next-step or remaining-task paragraph was found in the previous assistant response.",
+      suggestedNextAction: nextAction,
+      currentStatus: formatContinuationStatus({
+        phase: String(state.phase),
+        progress: remainingWork.progress,
+        remainingCount: remainingWork.items.length,
+        carryoverCount: carryoverSegments.length,
+        hasNextRoundTask,
+        nextAction,
+      }),
+    }
+  }
+
+  async onBeforeLLMCall(history?: AgentContext["history"]): Promise<BeforeLLMResult> {
     await this.loop.sense()
 
     if (this.loop.shouldReflect()) {
@@ -68,6 +159,8 @@ export class SelfDrivenAgent {
 
     // Capture current execution strategy from the driving loop
     const actGuidance = await this.loop.act()
+    const state = this.loop.getCurrentState()
+    const continuationState = await this.getAutonomousContinuationState(history)
 
     const needsUserInput = this.loop.shouldRequestUserInput()
     const enhancedContext: Record<string, unknown> = {
@@ -77,6 +170,14 @@ export class SelfDrivenAgent {
       hasActiveGoal: !!state.currentGoal,
       goalProgress: this.loop.getProgress(),
       needsUserInput,
+      currentStatus: continuationState.currentStatus,
+      hasNextRoundTask: continuationState.hasNextRoundTask,
+      stopAutonomousLoop: !continuationState.hasNextRoundTask,
+      stopReason: continuationState.stopReason,
+      suggestedNextAction: continuationState.suggestedNextAction,
+      carryoverSegmentCount: continuationState.carryoverSegments.length,
+      carryoverKeywords: continuationState.carryoverSegments.map((segment) => segment.keyword),
+      remainingItems: continuationState.remainingWork.items,
     }
 
     if (actGuidance) {
@@ -108,7 +209,7 @@ export class SelfDrivenAgent {
       ? "Repeated tool failures or low confidence detected. Stop autonomous exploration, summarize the current blocker, and ask the user one focused clarification before more tool calls."
       : undefined
 
-    return { enhancedContext, promptGuidance }
+    return { enhancedContext, promptGuidance, status: continuationState }
   }
 
   async onAfterToolExecution(toolName: string, success: boolean, result?: string): Promise<AfterToolResult> {

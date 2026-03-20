@@ -8,6 +8,8 @@ import { LearningStore } from "@/ai/memory/learning-store"
 import { ProjectMemory } from "@/ai/memory/project-memory"
 import { Global } from "@/global"
 import type { KnowledgeNode } from "@/ai/knowledge"
+import type { SessionID } from "@/session/schema"
+import type { ProjectID } from "@/project/schema"
 
 export namespace WorkspaceIntelligence {
   const SEMANTIC_CONCEPTS: Record<string, string[]> = {
@@ -29,8 +31,8 @@ export namespace WorkspaceIntelligence {
   }
 
   interface RenderOptions {
-    sessionID: string
-    projectID: string
+    sessionID: SessionID
+    projectID: ProjectID
     rootDir: string
     maxWorkspaces?: number
     maxSessions?: number

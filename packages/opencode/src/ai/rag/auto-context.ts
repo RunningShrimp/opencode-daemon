@@ -1,6 +1,7 @@
 import { Log } from "@/util/log"
 import { withTimeout } from "@/util/timeout"
 import { embeddingService } from "./embedding"
+import { ensureEmbeddingBackgroundServiceStarted } from "./embedding-bg-service"
 import { GroundingBundle, type GroundingEvidence, evidenceFromVectorResult } from "./evidence"
 import { ensureProjectIndexed } from "./indexer"
 import { vectorStore } from "./vector-store"
@@ -54,6 +55,12 @@ export async function buildAutoGroundingContext(input: {
     autoIndexed = warmResult?.indexed ?? false
   }
 
+  await ensureEmbeddingBackgroundServiceStarted().catch((error) => {
+    log.warn("failed to start embedding background service for auto grounding", {
+      projectId: input.projectId,
+      error: String(error),
+    })
+  })
   const queryEmbeddings = await embeddingService.getQueryEmbeddings(query)
   const results = await vectorStore.search(queryEmbeddings, {
     projectId: input.projectId,

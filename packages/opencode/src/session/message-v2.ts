@@ -13,13 +13,108 @@ import { STATUS_CODES } from "http"
 import { Storage } from "@/storage/storage"
 import { ProviderError } from "@/provider/error"
 import { iife } from "@/util/iife"
+import { Token } from "@/util/token"
 import { type SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
 
 export namespace MessageV2 {
+  const DEFAULT_CONTEXT_PROTECTED_TURNS = 2
+  const DEFAULT_CONTEXT_TOOL_OUTPUT_LIMIT = 320
+  const DEFAULT_CONTEXT_TOOL_ERROR_LIMIT = 120
+  const CONTEXT_PROTECTED_TOOLS = new Set(["task", "question", "skill", "todo", "plan_enter", "plan_exit"])
+
   export function isMedia(mime: string) {
     return mime.startsWith("image/") || mime === "application/pdf"
+  }
+
+  export type ModelContextBuildOptions = {
+    stripMedia?: boolean
+    optimizeContext?: boolean
+    protectedTurns?: number
+    maxToolOutputTokens?: number
+    maxToolErrorTokens?: number
+  }
+
+  export type ModelContextStats = {
+    optimized: boolean
+    estimatedTokensBefore: number
+    estimatedTokensAfter: number
+    protectedTurns: number
+    droppedReasoningParts: number
+    summarizedToolResults: number
+    deduplicatedToolResults: number
+    summarizedToolErrors: number
+    droppedSyntheticUserParts: number
+    droppedSyntheticUserMessages: number
+  }
+
+  function isSyntheticPart(part: Part) {
+    return "synthetic" in part && !!part.synthetic
+  }
+
+  function hasNonSyntheticUserSignal(parts: Part[]) {
+    return parts.some((part) => {
+      if (part.type === "text") return !isSyntheticPart(part) && !part.ignored && part.text.trim().length > 0
+      return part.type === "file"
+    })
+  }
+
+  function stableNormalize(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map((item) => stableNormalize(item))
+    if (value && typeof value === "object") {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, entry]) => [key, stableNormalize(entry)]),
+      )
+    }
+    return value
+  }
+
+  function estimateUnknownTokens(value: unknown) {
+    if (typeof value === "string") return Token.estimate(value)
+    try {
+      return Token.estimate(JSON.stringify(value))
+    } catch {
+      return 0
+    }
+  }
+
+  function estimateModelMessageTokens(messages: ModelMessage[]) {
+    return estimateUnknownTokens(messages)
+  }
+
+  function findProtectedStartIndex(messages: WithParts[], protectedTurns: number) {
+    if (protectedTurns <= 0) return messages.length
+
+    let turns = 0
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index]
+      if (message.info.role !== "user") continue
+      if (!hasNonSyntheticUserSignal(message.parts)) continue
+      turns++
+      if (turns >= protectedTurns) return index
+    }
+    return 0
+  }
+
+  function fingerprintToolPart(part: ToolPart) {
+    if (part.state.status !== "completed" && part.state.status !== "error") return undefined
+    return `${part.tool}:${JSON.stringify(stableNormalize(part.state.input))}`
+  }
+
+  function summarizeToolResultForContext(input: {
+    part: ToolPart
+    tokenEstimate: number
+    duplicate: boolean
+  }) {
+    const reason = input.duplicate ? "superseded by a later identical call" : "trimmed to reduce context noise"
+    return `[Context-optimized tool result omitted: ${input.part.tool}; ${reason}; original size about ${input.tokenEstimate} tokens.]`
+  }
+
+  function summarizeToolErrorForContext(input: { part: ToolPart; tokenEstimate: number }) {
+    return `[Context-optimized tool error condensed: ${input.part.tool}; original size about ${input.tokenEstimate} tokens.]`
   }
 
   export const OutputLengthError = NamedError.create("MessageOutputLengthError", z.object({}))
@@ -556,13 +651,32 @@ export namespace MessageV2 {
     }))
   }
 
-  export function toModelMessages(
+  export function prepareModelContext(
     input: WithParts[],
     model: Provider.Model,
-    options?: { stripMedia?: boolean },
-  ): ModelMessage[] {
+    options?: ModelContextBuildOptions,
+  ) {
     const result: UIMessage[] = []
     const toolNames = new Set<string>()
+    const stats: ModelContextStats = {
+      optimized: !!options?.optimizeContext,
+      estimatedTokensBefore: 0,
+      estimatedTokensAfter: 0,
+      protectedTurns: options?.protectedTurns ?? DEFAULT_CONTEXT_PROTECTED_TURNS,
+      droppedReasoningParts: 0,
+      summarizedToolResults: 0,
+      deduplicatedToolResults: 0,
+      summarizedToolErrors: 0,
+      droppedSyntheticUserParts: 0,
+      droppedSyntheticUserMessages: 0,
+    }
+    const optimizeContext = !!options?.optimizeContext
+    const protectedStartIndex = optimizeContext
+      ? findProtectedStartIndex(input, options?.protectedTurns ?? DEFAULT_CONTEXT_PROTECTED_TURNS)
+      : input.length
+    const maxToolOutputTokens = options?.maxToolOutputTokens ?? DEFAULT_CONTEXT_TOOL_OUTPUT_LIMIT
+    const maxToolErrorTokens = options?.maxToolErrorTokens ?? DEFAULT_CONTEXT_TOOL_ERROR_LIMIT
+    const toolFingerprints = new Set<string>()
     // Track media from tool results that need to be injected as user messages
     // for providers that don't support media in tool results.
     //
@@ -618,10 +732,13 @@ export namespace MessageV2 {
     }
 
     const isInternalToolPart = (part: ToolPart) => {
-      return part.metadata?.internal === true || part.state.metadata?.internal === true
+      return (
+        part.metadata?.internal === true ||
+        (part.state.status !== "pending" && part.state.metadata?.internal === true)
+      )
     }
 
-    for (const msg of input) {
+    for (const [messageIndex, msg] of input.entries()) {
       if (msg.parts.length === 0) continue
 
       if (msg.info.role === "user") {
@@ -632,12 +749,16 @@ export namespace MessageV2 {
         }
         result.push(userMessage)
         for (const part of msg.parts) {
-          if (part.type === "text" && !part.ignored)
+          if (part.type === "text" && !part.ignored) {
+            if (optimizeContext && messageIndex < protectedStartIndex && isSyntheticPart(part)) {
+              stats.droppedSyntheticUserParts++
+              continue
+            }
             userMessage.parts.push({
               type: "text",
               text: part.text,
             })
-          // text/plain and directory files are converted into text parts, ignore them
+          }
           if (part.type === "file" && part.mime !== "text/plain" && part.mime !== "application/x-directory") {
             if (options?.stripMedia && isMedia(part.mime)) {
               userMessage.parts.push({
@@ -667,6 +788,10 @@ export namespace MessageV2 {
             })
           }
         }
+        if (optimizeContext && messageIndex < protectedStartIndex && !hasNonSyntheticUserSignal(msg.parts)) {
+          result.pop()
+          stats.droppedSyntheticUserMessages++
+        }
       }
 
       if (msg.info.role === "assistant") {
@@ -687,6 +812,7 @@ export namespace MessageV2 {
           role: "assistant",
           parts: [],
         }
+        const isProtectedMessage = messageIndex >= protectedStartIndex
         for (const part of msg.parts) {
           if (part.type === "text")
             assistantMessage.parts.push({
@@ -702,11 +828,29 @@ export namespace MessageV2 {
             if (isInternalToolPart(part)) continue
             toolNames.add(part.tool)
             if (part.state.status === "completed") {
-              const outputText = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
-              const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
+              const baseOutputText = part.state.time.compacted ? "[Old tool result content cleared]" : part.state.output
+              const fingerprint = fingerprintToolPart(part)
+              const duplicate =
+                !!fingerprint && toolFingerprints.has(fingerprint) && !isProtectedMessage && !CONTEXT_PROTECTED_TOOLS.has(part.tool)
+              if (fingerprint) toolFingerprints.add(fingerprint)
+              const tokenEstimate = estimateUnknownTokens(baseOutputText)
+              const shouldSummarizeOutput =
+                optimizeContext &&
+                !isProtectedMessage &&
+                !part.state.time.compacted &&
+                !CONTEXT_PROTECTED_TOOLS.has(part.tool) &&
+                (duplicate || tokenEstimate > maxToolOutputTokens)
+              const outputText = shouldSummarizeOutput
+                ? summarizeToolResultForContext({ part, tokenEstimate, duplicate })
+                : baseOutputText
+              const attachments =
+                part.state.time.compacted || options?.stripMedia || shouldSummarizeOutput ? [] : (part.state.attachments ?? [])
 
-              // For providers that don't support media in tool results, extract media files
-              // (images, PDFs) to be sent as a separate user message
+              if (shouldSummarizeOutput) {
+                stats.summarizedToolResults++
+                if (duplicate) stats.deduplicatedToolResults++
+              }
+
               const mediaAttachments = attachments.filter((a) => isMedia(a.mime))
               const nonMediaAttachments = attachments.filter((a) => !isMedia(a.mime))
               if (!supportsMediaInToolResults && mediaAttachments.length > 0) {
@@ -731,17 +875,25 @@ export namespace MessageV2 {
                 ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
               })
             }
-            if (part.state.status === "error")
+            if (part.state.status === "error") {
+              const errorEstimate = estimateUnknownTokens(part.state.error)
+              const errorText =
+                optimizeContext &&
+                !isProtectedMessage &&
+                !CONTEXT_PROTECTED_TOOLS.has(part.tool) &&
+                errorEstimate > maxToolErrorTokens
+                  ? summarizeToolErrorForContext({ part, tokenEstimate: errorEstimate })
+                  : part.state.error
+              if (errorText !== part.state.error) stats.summarizedToolErrors++
               assistantMessage.parts.push({
                 type: ("tool-" + part.tool) as `tool-${string}`,
                 state: "output-error",
                 toolCallId: part.callID,
                 input: part.state.input,
-                errorText: part.state.error,
+                errorText,
                 ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
               })
-            // Handle pending/running tool calls to prevent dangling tool_use blocks
-            // Anthropic/Claude APIs require every tool_use to have a corresponding tool_result
+            }
             if (part.state.status === "pending" || part.state.status === "running")
               assistantMessage.parts.push({
                 type: ("tool-" + part.tool) as `tool-${string}`,
@@ -753,6 +905,10 @@ export namespace MessageV2 {
               })
           }
           if (part.type === "reasoning") {
+            if (optimizeContext && !isProtectedMessage) {
+              stats.droppedReasoningParts++
+              continue
+            }
             assistantMessage.parts.push({
               type: "reasoning",
               text: part.text,
@@ -762,8 +918,6 @@ export namespace MessageV2 {
         }
         if (assistantMessage.parts.length > 0) {
           result.push(assistantMessage)
-          // Inject pending media as a user message for providers that don't support
-          // media (images, PDFs) in tool results
           if (media.length > 0) {
             result.push({
               id: MessageID.ascending(),
@@ -786,14 +940,30 @@ export namespace MessageV2 {
     }
 
     const tools = Object.fromEntries(Array.from(toolNames).map((toolName) => [toolName, { toModelOutput }]))
-
-    return convertToModelMessages(
+    const messages = convertToModelMessages(
       result.filter((msg) => msg.parts.some((part) => part.type !== "step-start")),
       {
         //@ts-expect-error (convertToModelMessages expects a ToolSet but only actually needs tools[name]?.toModelOutput)
         tools,
       },
     )
+    stats.estimatedTokensAfter = estimateModelMessageTokens(messages)
+    stats.estimatedTokensBefore = estimateUnknownTokens(input)
+    return {
+      messages,
+      stats,
+    }
+  }
+
+  export function toModelMessages(
+    input: WithParts[],
+    model: Provider.Model,
+    options?: ModelContextBuildOptions,
+  ): ModelMessage[] {
+    if (options?.optimizeContext) return prepareModelContext(input, model, options).messages
+
+    const normalizedOptions = options ? { stripMedia: options.stripMedia } : undefined
+    return prepareModelContext(input, model, normalizedOptions).messages
   }
 
   export const page = fn(

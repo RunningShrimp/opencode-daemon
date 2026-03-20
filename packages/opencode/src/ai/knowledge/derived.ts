@@ -3,7 +3,7 @@ import path from "node:path"
 import { KnowledgeGraph } from "./index"
 import { Instance } from "@/project/instance"
 import { Log } from "@/util/log"
-import { parseTreeSitterSyntaxTree } from "@/util/tree-sitter-scope"
+import { parseTreeSitterSyntaxTree, type SupportedLanguage } from "@/util/tree-sitter-scope"
 
 const log = Log.create({ service: "knowledge.derived" })
 const MAX_SOURCE_FILES = 150
@@ -706,7 +706,7 @@ const ROOT_LIKE_NODE_TYPES = new Set([
   "compilation_unit",
 ])
 
-type TreeSitterLanguage = Awaited<ReturnType<typeof parseTreeSitterSyntaxTree>> extends { language: infer T } ? T : never
+type TreeSitterLanguage = SupportedLanguage
 
 async function extractTreeSitterSourceSemantics(relPath: string, content: string): Promise<SourceSemanticSnapshot | undefined> {
   const parsed = await parseTreeSitterSyntaxTree({ filePath: relPath, content }).catch(() => undefined)

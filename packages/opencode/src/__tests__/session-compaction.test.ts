@@ -2,12 +2,13 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test"
 import { Config } from "../config/config"
 import { type Provider } from "../provider/provider"
 import { SessionCompaction } from "../session/compaction"
+import { modelID, providerID, sessionID as makeSessionID } from "../test-helpers/ids"
 import { globalManager as predictorManager, getPredictor } from "../util/compaction-predictor"
 
 function createModel(overrides: Partial<Provider.Model["limit"]> = {}): Provider.Model {
   return {
-    id: "test-model",
-    providerID: "test-provider",
+    id: modelID("test-model"),
+    providerID: providerID("test-provider"),
     api: {
       id: "test-model",
       url: "https://example.com",
@@ -85,7 +86,7 @@ describe("SessionCompaction integration", () => {
 
   test("recordUsage writes session token history into the predictor", async () => {
     await SessionCompaction.recordUsage({
-      sessionID: "session-1",
+      sessionID: makeSessionID("session-1"),
       tokens: createTokens(12000, 2500, 500),
       model: createModel(),
     })
@@ -130,7 +131,7 @@ describe("SessionCompaction integration", () => {
   test("isOverflow returns false when model has context: 0", async () => {
     const model = createModel({ context: 0, input: 0, output: 0 })
     const overflow = await SessionCompaction.isOverflow({
-      sessionID: "session-zero-context",
+      sessionID: makeSessionID("session-zero-context"),
       tokens: createTokens(10000, 5000),
       model,
     })
@@ -144,11 +145,45 @@ describe("SessionCompaction integration", () => {
 
     const model = createModel()
     const overflow = await SessionCompaction.isOverflow({
-      sessionID: "session-disabled",
+      sessionID: makeSessionID("session-disabled"),
       tokens: createTokens(50000, 10000),
       model,
     })
     expect(overflow).toBe(false)
+  })
+
+  test("isEstimatedOverflow respects usable input threshold", async () => {
+    const model = createModel({ context: 70000, input: 60000, output: 5000 })
+
+    await expect(
+      SessionCompaction.isEstimatedOverflow({
+        sessionID: makeSessionID("session-estimated-safe"),
+        estimatedInputTokens: 52000,
+        model,
+      }),
+    ).resolves.toBe(false)
+
+    await expect(
+      SessionCompaction.isEstimatedOverflow({
+        sessionID: makeSessionID("session-estimated-overflow"),
+        estimatedInputTokens: 56000,
+        model,
+      }),
+    ).resolves.toBe(true)
+  })
+
+  test("isEstimatedOverflow returns false when compaction auto is disabled", async () => {
+    vi.spyOn(Config, "get").mockResolvedValue({
+      compaction: { auto: false },
+    } as Awaited<ReturnType<typeof Config.get>>)
+
+    await expect(
+      SessionCompaction.isEstimatedOverflow({
+        sessionID: makeSessionID("session-estimated-disabled"),
+        estimatedInputTokens: 999999,
+        model: createModel(),
+      }),
+    ).resolves.toBe(false)
   })
 
   test("predictor does not preempt when confidence is below threshold", async () => {

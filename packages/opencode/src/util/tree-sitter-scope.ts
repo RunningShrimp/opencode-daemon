@@ -665,7 +665,7 @@ function summarizeGenericNode(node: TreeSitterNode, content: string) {
   return null
 }
 
-function summarizeCommandNode(node: TreeSitterNode, content: string) {
+function summarizeCommandNode(node: TreeSitterNode, content: string): string | null {
   const commandName = firstNamedChildOfType(node, "command_name")
   const commandNameToken = commandName ? sanitizeSyntaxToken(nodeText(commandName, content)) : null
   const args = namedChildren(node)
@@ -677,7 +677,7 @@ function summarizeCommandNode(node: TreeSitterNode, content: string) {
   return [commandNameToken, ...args].filter((value): value is string => Boolean(value)).join("_") || null
 }
 
-function summarizeShellControlNode(node: TreeSitterNode, content: string) {
+function summarizeShellControlNode(node: TreeSitterNode, content: string): string | null {
   switch (node.type) {
     case "function_definition": {
       const name = firstNamedChildOfType(node, "word")
@@ -727,7 +727,7 @@ function summarizeShellControlNode(node: TreeSitterNode, content: string) {
   }
 }
 
-function extractNodeToken(node: TreeSitterNode, content: string) {
+function extractNodeToken(node: TreeSitterNode, content: string): string | null {
   const specialized = summarizeShellControlNode(node, content)
   if (specialized) {
     return specialized
@@ -772,13 +772,13 @@ function extractNodeToken(node: TreeSitterNode, content: string) {
   return null
 }
 
-function formatSyntaxHintSegment(node: TreeSitterNode, content: string) {
+function formatSyntaxHintSegment(node: TreeSitterNode, content: string): string {
   const semanticNode = normalizeSemanticNode(node)
   const token = extractNodeToken(semanticNode, content)
   return token ? `${semanticNode.type}(${token})` : semanticNode.type
 }
 
-export function buildTreeSitterSyntaxSummary(node: TreeSitterNode, content: string) {
+export function buildTreeSitterSyntaxSummary(node: TreeSitterNode, content: string): string {
   const semanticNode = normalizeSemanticNode(node)
   const token = extractNodeToken(semanticNode, content)
   return token ? `${semanticNode.type}:${token}` : semanticNode.type

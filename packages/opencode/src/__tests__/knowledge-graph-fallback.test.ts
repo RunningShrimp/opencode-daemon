@@ -3,6 +3,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import type { Project } from "../project/project"
+import { projectID } from "../test-helpers/ids"
 
 const cleanup: string[] = []
 const envKeys = ["XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME"] as const
@@ -10,7 +11,7 @@ const originalEnv = new Map<string, string | undefined>()
 
 function projectInfo(worktree: string): Project.Info {
   return {
-    id: "knowledge-fallback-project",
+    id: projectID("knowledge-fallback-project"),
     worktree,
     vcs: "git",
     time: {
