@@ -1,6 +1,2 @@
 export * from "effect"
-export * from "effect/Effect"
-export * from "effect/Match"
-export * from "effect/Option"
-export * from "effect/Duration"
 export { runtime } from "./runtime"

@@ -8,6 +8,8 @@
   "scripts": {
     "typecheck": "tsgo --noEmit",
     "test": "bun test --timeout 30000",
+    "test:daemon-scenarios": "bun test src/__tests__/daemon-scenario-matrix.test.ts src/__tests__/daemon-p8-gates.test.ts src/__tests__/daemon-info-service.test.ts src/__tests__/serve-command.test.ts src/__tests__/status-command.test.ts",
+    "test:daemon-p8": "bun test src/__tests__/daemon-scenario-matrix.test.ts src/__tests__/daemon-p8-gates.test.ts src/__tests__/daemon-info-service.test.ts src/__tests__/serve-command.test.ts src/__tests__/status-command.test.ts src/__tests__/daemon-single-file-bootstrap.test.ts src/__tests__/daemon-tui-attach-compatibility.test.ts",
     "build": "bun run script/build.ts",
     "dev": "bun run --conditions=browser ./src/index.ts",
     "random": "echo 'Random script updated at $(date)' && echo 'Change queued successfully' && echo 'Another change made' && echo 'Yet another change' && echo 'One more change' && echo 'Final change' && echo 'Another final change' && echo 'Yet another final change'",
@@ -85,6 +87,7 @@
     "@gitlab/opencode-gitlab-auth": "1.3.3",
     "@hono/standard-validator": "0.1.5",
     "@hono/zod-validator": "catalog:",
+    "@huggingface/transformers": "3.8.1",
     "@modelcontextprotocol/sdk": "1.25.2",
     "@octokit/graphql": "9.0.2",
     "@octokit/rest": "catalog:",

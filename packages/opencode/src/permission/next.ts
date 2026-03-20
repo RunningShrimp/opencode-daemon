@@ -95,3 +95,7 @@ export namespace PermissionNext {
     return result
   }
 }
+
+export const RejectedError = S.RejectedError
+export const CorrectedError = S.CorrectedError
+export const DeniedError = S.DeniedError

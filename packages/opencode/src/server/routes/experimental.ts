@@ -8,10 +8,52 @@ import { Instance } from "../../project/instance"
 import { Project } from "../../project/project"
 import { MCP } from "../../mcp"
 import { Session } from "../../session"
+import { knowledgeGraph } from "@/ai/knowledge"
+import { KnowledgeContext } from "@/ai/knowledge/context"
+import { refreshDerivedKnowledgeGraphSafe } from "@/ai/knowledge/derived"
 import { zodToJsonSchema } from "zod-to-json-schema"
 import { errors } from "../error"
 import { lazy } from "../../util/lazy"
 import { WorkspaceRoutes } from "./workspace"
+
+const KnowledgeRelation = z
+  .object({
+    relation: z.string(),
+    targetName: z.string(),
+    targetType: z.string(),
+  })
+  .meta({ ref: "KnowledgeRelation" })
+
+const KnowledgeSidebarNode = z
+  .object({
+    id: z.string(),
+    name: z.string(),
+    type: z.string(),
+    path: z.string().optional(),
+    accessCount: z.number(),
+    tags: z.array(z.string()),
+    related: z.array(KnowledgeRelation),
+  })
+  .meta({ ref: "KnowledgeSidebarNode" })
+
+const KnowledgeSidebarResponse = z
+  .object({
+    stats: z.object({
+      nodeCount: z.number(),
+      edgeCount: z.number(),
+      typeBreakdown: z.record(z.string(), z.number()),
+    }),
+    relevant: z.array(KnowledgeSidebarNode),
+    groups: z.array(
+      z.object({
+        type: z.string(),
+        count: z.number(),
+        nodes: z.array(KnowledgeSidebarNode),
+      }),
+    ),
+    refreshedAt: z.number(),
+  })
+  .meta({ ref: "KnowledgeSidebarResponse" })
 
 export const ExperimentalRoutes = lazy(() =>
   new Hono()
@@ -245,6 +287,100 @@ export const ExperimentalRoutes = lazy(() =>
           c.header("x-next-cursor", String(list[list.length - 1].time.updated))
         }
         return c.json(list)
+      },
+    )
+    .get(
+      "/knowledge",
+      describeRoute({
+        summary: "Get knowledge graph sidebar state",
+        description: "Return a compact knowledge-graph snapshot for TUI sidebar rendering, including stats, relevant nodes, and grouped tree data.",
+        operationId: "experimental.knowledge.get",
+        responses: {
+          200: {
+            description: "Knowledge graph sidebar state",
+            content: {
+              "application/json": {
+                schema: resolver(KnowledgeSidebarResponse),
+              },
+            },
+          },
+        },
+      }),
+      validator(
+        "query",
+        z.object({
+          query: z.string().optional(),
+          limit: z.coerce.number().int().positive().max(12).optional(),
+        }),
+      ),
+      async (c) => {
+        const query = c.req.valid("query")
+        if (knowledgeGraph.getStats().nodeCount === 0) {
+          await refreshDerivedKnowledgeGraphSafe(knowledgeGraph, Instance.project.worktree)
+        }
+
+        const limit = query.limit ?? 6
+        const relevantRanked = query.query
+          ? KnowledgeContext.getRelevantContext(query.query, {
+              graph: knowledgeGraph,
+              rootDir: Instance.project.worktree,
+              limit,
+              maxRelated: 4,
+            })
+          : []
+
+        const serializeNode = (node: ReturnType<typeof knowledgeGraph.query>[number]) => {
+          const pathValue = typeof node.metadata.path === "string" ? node.metadata.path : undefined
+          const related = knowledgeGraph
+            .getEdges(node.id, "both")
+            .slice(0, 4)
+            .map((edge) => {
+              const targetId = edge.sourceId === node.id ? edge.targetId : edge.sourceId
+              const target = knowledgeGraph.getNode(targetId)
+              if (!target) return undefined
+              return {
+                relation: edge.relation,
+                targetName: target.name,
+                targetType: target.type,
+              }
+            })
+            .filter(Boolean)
+
+          return {
+            id: node.id,
+            name: node.name,
+            type: node.type,
+            path: pathValue,
+            accessCount: node.accessCount,
+            tags: node.tags,
+            related,
+          }
+        }
+
+        const groupedNodes = knowledgeGraph.query({ text: query.query, limit: 24 })
+        const groups = Object.entries(
+          groupedNodes.reduce<Record<string, Array<ReturnType<typeof serializeNode>>>>((acc, node) => {
+            const key = node.type
+            acc[key] = acc[key] ?? []
+            if (acc[key].length < 6) {
+              acc[key].push(serializeNode(node))
+            }
+            return acc
+          }, {}),
+        )
+          .sort((left, right) => right[1].length - left[1].length || left[0].localeCompare(right[0]))
+          .map(([type, nodes]) => ({
+            type,
+            count: knowledgeGraph.getStats().typeBreakdown[type] ?? nodes.length,
+            nodes,
+          }))
+
+        return c.json({
+          stats: knowledgeGraph.getStats(),
+          relevant: relevantRanked.map((item) => serializeNode(item.node)),
+          groups,
+          refreshedAt: Date.now(),
+        })
       },
     )
     .get(

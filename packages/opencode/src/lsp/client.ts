@@ -115,7 +115,12 @@ export namespace LSPClient {
       }),
       45_000,
     ).catch((err) => {
-      l.error("initialize error", { error: err })
+      const errorText = String(err)
+      if (/Operation timed out/i.test(errorText)) {
+        l.warn("initialize timeout", { error: err })
+      } else {
+        l.error("initialize error", { error: err })
+      }
       throw new InitializeError(
         { serverID: input.serverID },
         {

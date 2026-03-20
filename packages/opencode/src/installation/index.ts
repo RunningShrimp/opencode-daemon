@@ -63,7 +63,7 @@ export namespace Installation {
     }).then((x) => x.text)
   }
 
-  async function upgradeCurl(target: string) {
+  async function upgradeCurl(target: string): Promise<Process.Result> {
     const body = await fetch("https://opencode.ai/install").then((res) => {
       if (!res.ok) throw new Error(res.statusText)
       return res.text()
@@ -82,8 +82,8 @@ export namespace Installation {
     const [code, stdout, stderr] = await Promise.all([proc.exited, buffer(proc.stdout), buffer(proc.stderr)])
     return {
       code,
-      stdout,
-      stderr,
+      stdout: Buffer.from(stdout),
+      stderr: Buffer.from(stderr),
     }
   }
 
@@ -202,7 +202,7 @@ export namespace Installation {
   }
 
   export async function upgrade(method: Method, target: string) {
-    let result: Awaited<ReturnType<typeof upgradeCurl>> | undefined
+    let result: Process.Result | undefined
     switch (method) {
       case "curl":
         result = await upgradeCurl(target)

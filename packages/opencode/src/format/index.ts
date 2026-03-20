@@ -122,12 +122,12 @@ export namespace Format {
           )
           const exit = await proc.exited
           if (exit !== 0)
-            log.error("failed", {
+            log.warn("failed", {
               command: item.command,
               ...item.environment,
             })
         } catch (error) {
-          log.error("failed to format file", {
+          log.warn("failed to format file", {
             error,
             command: item.command,
             ...item.environment,

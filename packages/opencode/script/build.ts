@@ -14,6 +14,7 @@ process.chdir(dir)
 
 import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
+import { loadRequiredMigrationJournal } from "../src/storage/migration-manifest"
 
 const modelsUrl = process.env.OPENCODE_MODELS_URL || "https://models.dev"
 // Fetch and generate models.dev snapshot
@@ -26,34 +27,7 @@ await Bun.write(
 )
 console.log("Generated models-snapshot.ts")
 
-// Load migrations from migration directories
-const migrationDirs = (
-  await fs.promises.readdir(path.join(dir, "migration"), {
-    withFileTypes: true,
-  })
-)
-  .filter((entry) => entry.isDirectory() && /^\d{4}\d{2}\d{2}\d{2}\d{2}\d{2}/.test(entry.name))
-  .map((entry) => entry.name)
-  .sort()
-
-const migrations = await Promise.all(
-  migrationDirs.map(async (name) => {
-    const file = path.join(dir, "migration", name, "migration.sql")
-    const sql = await Bun.file(file).text()
-    const match = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/.exec(name)
-    const timestamp = match
-      ? Date.UTC(
-          Number(match[1]),
-          Number(match[2]) - 1,
-          Number(match[3]),
-          Number(match[4]),
-          Number(match[5]),
-          Number(match[6]),
-        )
-      : 0
-    return { sql, timestamp, name }
-  }),
-)
+const migrations = loadRequiredMigrationJournal(path.join(dir, "migration"))
 console.log(`Loaded ${migrations.length} migrations`)
 
 const singleFlag = process.argv.includes("--single")
@@ -184,7 +158,7 @@ for (const item of targets) {
       autoloadTsconfig: true,
       autoloadPackageJson: true,
       target: name.replace(pkg.name, "bun") as any,
-      outfile: `dist/${name}/bin/opencode`,
+      outfile: `dist/${name}/bin/${item.os === "win32" ? (singleFlag ? "opencoded.exe" : "opencode.exe") : singleFlag ? "opencoded" : "opencode"}`,
       execArgv: [`--user-agent=opencode/${Script.version}`, "--use-system-ca", "--"],
       windows: {},
     },
@@ -200,9 +174,11 @@ for (const item of targets) {
   })
 
   await $`rm -rf ./dist/${name}/bin/tui`
-  const builtBinary = path.join(dir, `dist/${name}/bin`, item.os === "win32" ? "opencode.exe" : "opencode")
-  const compatBinary = path.join(dir, `dist/${name}/bin`, item.os === "win32" ? "opencoded.exe" : "opencoded")
-  await fs.promises.copyFile(builtBinary, compatBinary)
+  if (!singleFlag) {
+    const builtBinary = path.join(dir, `dist/${name}/bin`, item.os === "win32" ? "opencode.exe" : "opencode")
+    const compatBinary = path.join(dir, `dist/${name}/bin`, item.os === "win32" ? "opencoded.exe" : "opencoded")
+    await fs.promises.copyFile(builtBinary, compatBinary)
+  }
   await Bun.file(`dist/${name}/package.json`).write(
     JSON.stringify(
       {

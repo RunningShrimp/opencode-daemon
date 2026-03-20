@@ -11,6 +11,8 @@ import { createOpencodeClient, type Event } from "@opencode-ai/sdk/v2"
 import type { BunWebSocketData } from "hono/bun"
 import { Flag } from "@/flag/flag"
 import { setTimeout as sleep } from "node:timers/promises"
+import { createLocalTransportAdapter } from "@/daemon/transport/local-transport-adapter"
+import { MasterBootstrapCoordinator } from "@/daemon/bootstrap/master-bootstrap"
 
 await Log.init({
   print: process.argv.includes("--print-logs"),
@@ -39,6 +41,7 @@ GlobalBus.on("event", (event) => {
 })
 
 let server: Bun.Server<BunWebSocketData> | undefined
+let managedMasterStop: (() => Promise<void>) | undefined
 
 const eventStream = {
   abort: undefined as AbortController | undefined,
@@ -50,12 +53,15 @@ const startEventStream = (input: { directory: string; workspaceID?: string }) =>
   eventStream.abort = abort
   const signal = abort.signal
 
-  const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const request = new Request(input, init)
-    const auth = getAuthorizationHeader()
-    if (auth) request.headers.set("Authorization", auth)
-    return Server.Default().fetch(request)
-  }) as typeof globalThis.fetch
+  const fetchFn = createLocalTransportAdapter({
+    dispatch: async (request) => {
+      const auth = getAuthorizationHeader()
+      if (auth) request.headers.set("Authorization", auth)
+      return Server.Default().fetch(request)
+    },
+    rejectExternal: true,
+    internalOrigin: "http://opencode.internal",
+  })
 
   const sdk = createOpencodeClient({
     baseUrl: "http://opencode.internal",
@@ -119,9 +125,30 @@ export const rpc = {
     }
   },
   async server(input: { port: number; hostname: string; mdns?: boolean; cors?: string[] }) {
-    if (server) await server.stop(true)
-    server = Server.listen(input)
-    return { url: server.url.toString() }
+    const coordinator = new MasterBootstrapCoordinator()
+    const result = await coordinator.ensureMaster({
+      namespaceID: "local",
+      start: async () => {
+        if (server) await server.stop(true)
+        server = Server.listen(input)
+        return {
+          endpoint: server.url.toString(),
+          pid: process.pid,
+          stop: async () => {
+            if (server) {
+              await server.stop(true)
+              server = undefined
+            }
+          },
+        }
+      },
+    })
+
+    if (result.mode === "started") {
+      managedMasterStop = result.stop
+    }
+
+    return { url: result.endpoint }
   },
   async checkUpgrade(input: { directory: string }) {
     await Instance.provide({
@@ -143,6 +170,11 @@ export const rpc = {
     Log.Default.info("worker shutting down")
     if (eventStream.abort) eventStream.abort.abort()
     await Instance.disposeAll()
+    if (managedMasterStop) {
+      await managedMasterStop()
+      managedMasterStop = undefined
+      return
+    }
     if (server) server.stop(true)
   },
 }

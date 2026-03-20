@@ -4,6 +4,10 @@ import { getAdaptor } from "./adaptors"
 import { Workspace } from "./workspace"
 import { WorkspaceContext } from "./workspace-context"
 
+export function isMasterWorkspaceControlRoute(pathname: string): boolean {
+  return pathname.startsWith("/experimental/workspace")
+}
+
 // This middleware forwards all non-GET requests if the workspace is a
 // remote. The remote workspace needs to handle session mutations
 async function routeRequest(req: Request) {
@@ -12,6 +16,11 @@ async function routeRequest(req: Request) {
   // which don't mutate anything will be handled locally
   //
   // if (req.method === "GET") return
+
+  const url = new URL(req.url)
+  if (isMasterWorkspaceControlRoute(url.pathname)) {
+    return
+  }
 
   if (!WorkspaceContext.workspaceID) return
 
@@ -27,7 +36,7 @@ async function routeRequest(req: Request) {
 
   const adaptor = await getAdaptor(workspace.type)
 
-  return adaptor.fetch(workspace, `${new URL(req.url).pathname}${new URL(req.url).search}`, {
+  return adaptor.fetch(workspace, `${url.pathname}${url.search}`, {
     method: req.method,
     body: req.method === "GET" || req.method === "HEAD" ? undefined : await req.arrayBuffer(),
     signal: req.signal,

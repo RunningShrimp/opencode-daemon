@@ -14,6 +14,33 @@ import { Flag } from "@/flag/flag"
 export namespace LSP {
   const log = Log.create({ service: "lsp" })
 
+  function isTimeoutLikeError(err: unknown) {
+    const timeoutPattern = /(?:operation\s+)?timed out(?:\s+after\s+\d+ms)?/i
+    const visited = new Set<unknown>()
+    let current: unknown = err
+
+    while (current && typeof current === "object" && !visited.has(current)) {
+      visited.add(current)
+
+      const asRecord = current as Record<string, unknown>
+      const candidateText = [
+        String(current),
+        typeof asRecord.name === "string" ? asRecord.name : "",
+        typeof asRecord.message === "string" ? asRecord.message : "",
+      ]
+        .filter(Boolean)
+        .join(" ")
+
+      if (timeoutPattern.test(candidateText)) {
+        return true
+      }
+
+      current = asRecord.cause
+    }
+
+    return timeoutPattern.test(String(err))
+  }
+
   export const Event = {
     Updated: BusEvent.define("lsp.updated", z.object({})),
   }
@@ -203,7 +230,11 @@ export namespace LSP {
       }).catch((err) => {
         s.broken.add(key)
         handle.process.kill()
-        log.error(`Failed to initialize LSP client ${server.id}`, { error: err })
+        if (isTimeoutLikeError(err)) {
+          log.warn(`LSP client ${server.id} initialize timed out`, { error: err })
+        } else {
+          log.error(`Failed to initialize LSP client ${server.id}`, { error: err })
+        }
         return undefined
       })
 
@@ -287,7 +318,11 @@ export namespace LSP {
         }),
       )
     } catch (err) {
-      log.error("failed to touch file", { err, file: input })
+      if (isTimeoutLikeError(err)) {
+        log.warn("touch file timed out while initializing lsp", { err, file: input })
+      } else {
+        log.error("failed to touch file", { err, file: input })
+      }
     }
   }
 

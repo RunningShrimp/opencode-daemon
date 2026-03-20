@@ -5,16 +5,17 @@ import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
 import { TuiConfig } from "@/config/tui"
 import { Instance } from "@/project/instance"
 import { existsSync } from "fs"
+import { ServerRegistryStore } from "@/daemon/bootstrap/registry"
+import { MasterDiscoveryService } from "@/daemon/bootstrap/discovery"
 
 export const AttachCommand = cmd({
-  command: "attach <url>",
+  command: "attach [url]",
   describe: "attach to a running opencode server",
   builder: (yargs) =>
     yargs
       .positional("url", {
         type: "string",
         describe: "http://localhost:4096",
-        demandOption: true,
       })
       .option("dir", {
         type: "string",
@@ -70,8 +71,23 @@ export const AttachCommand = cmd({
         directory: directory && existsSync(directory) ? directory : process.cwd(),
         fn: () => TuiConfig.get(),
       })
+
+      const resolvedURL = args.url
+        ? args.url
+        : await (async () => {
+            const discovery = new MasterDiscoveryService(new ServerRegistryStore())
+            const master = await discovery.findHealthyMaster("local")
+            return master?.endpoint
+          })()
+
+      if (!resolvedURL) {
+        UI.error("No running opencode master found. Start one with `opencode serve` or pass a URL explicitly.")
+        process.exitCode = 1
+        return
+      }
+
       await tui({
-        url: args.url,
+        url: resolvedURL,
         config,
         args: {
           continue: args.continue,

@@ -6,6 +6,7 @@ import { ACP } from "@/acp/agent"
 import { Server } from "@/server/server"
 import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import { withNetworkOptions, resolveNetworkOptions } from "../network"
+import { MasterBootstrapCoordinator } from "@/daemon/bootstrap/master-bootstrap"
 
 const log = Log.create({ service: "acp-command" })
 
@@ -22,11 +23,26 @@ export const AcpCommand = cmd({
   handler: async (args) => {
     process.env.OPENCODE_CLIENT = "acp"
     await bootstrap(process.cwd(), async () => {
+      const namespaceID = "local"
+      const coordinator = new MasterBootstrapCoordinator()
       const opts = await resolveNetworkOptions(args)
-      const server = Server.listen(opts)
+      const result = await coordinator.ensureMaster({
+        namespaceID,
+        start: async () => {
+          const server = Server.listen(opts)
+          const endpoint = `http://${server.hostname}:${server.port}`
+          return {
+            endpoint,
+            pid: process.pid,
+            stop: async () => {
+              await server.stop(true)
+            },
+          }
+        },
+      })
 
       const sdk = createOpencodeClient({
-        baseUrl: `http://${server.hostname}:${server.port}`,
+        baseUrl: result.endpoint,
       })
 
       const input = new WritableStream<Uint8Array>({
@@ -61,10 +77,16 @@ export const AcpCommand = cmd({
 
       log.info("setup connection")
       process.stdin.resume()
-      await new Promise((resolve, reject) => {
-        process.stdin.on("end", resolve)
-        process.stdin.on("error", reject)
-      })
+      try {
+        await new Promise((resolve, reject) => {
+          process.stdin.on("end", resolve)
+          process.stdin.on("error", reject)
+        })
+      } finally {
+        if (result.mode === "started") {
+          await result.stop()
+        }
+      }
     })
   },
 })

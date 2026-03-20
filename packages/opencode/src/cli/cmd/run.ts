@@ -27,6 +27,7 @@ import { SkillTool } from "../../tool/skill"
 import { BashTool } from "../../tool/bash"
 import { TodoWriteTool } from "../../tool/todo"
 import { Locale } from "../../util/locale"
+import { createLocalTransportAdapter } from "@/daemon/transport/local-transport-adapter"
 
 type ToolProps<T extends Tool.Info> = {
   input: Tool.InferParameters<T>
@@ -665,10 +666,11 @@ export const RunCommand = cmd({
     }
 
     await bootstrap(process.cwd(), async () => {
-      const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
-        const request = new Request(input, init)
-        return Server.Default().fetch(request)
-      }) as typeof globalThis.fetch
+      const fetchFn = createLocalTransportAdapter({
+        dispatch: async (request) => Server.Default().fetch(request),
+        rejectExternal: true,
+        internalOrigin: "http://opencode.internal",
+      })
       const sdk = createOpencodeClient({ baseUrl: "http://opencode.internal", fetch: fetchFn })
       await execute(sdk)
     })

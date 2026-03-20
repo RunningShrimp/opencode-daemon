@@ -10,6 +10,13 @@ import { Log } from "../../util/log"
 import { lazy } from "../../util/lazy"
 import { Config } from "../../config/config"
 import { errors } from "../error"
+import { DaemonInfoService } from "@/daemon/master/daemon-info"
+import {
+  configurePublicListener,
+  disablePublicListener,
+  getPublicListenerStatus,
+  type PublicListenerOptions,
+} from "../public-listener"
 
 const log = Log.create({ service: "server" })
 
@@ -36,6 +43,130 @@ export const GlobalRoutes = lazy(() =>
       }),
       async (c) => {
         return c.json({ healthy: true, version: Installation.VERSION })
+      },
+    )
+    .get(
+      "/daemon-info",
+      describeRoute({
+        summary: "Get daemon info",
+        description: "Get daemon diagnostics including master, worker, lane, and toolchain cell metrics.",
+        operationId: "global.daemon-info",
+        responses: {
+          200: {
+            description: "Daemon diagnostics",
+            content: {
+              "application/json": {
+                schema: resolver(z.any()),
+              },
+            },
+          },
+        },
+      }),
+      async (c) => {
+        const service = new DaemonInfoService({
+          publicListenerProvider: () => getPublicListenerStatus(),
+        })
+        const payload = await service.collect("local")
+        return c.json(payload)
+      },
+    )
+    .get(
+      "/public-listener",
+      describeRoute({
+        summary: "Get public listener status",
+        description: "Get the current optional public listener status on this master process.",
+        operationId: "global.public-listener.get",
+        responses: {
+          200: {
+            description: "Public listener status",
+            content: {
+              "application/json": {
+                schema: resolver(
+                  z.object({
+                    active: z.boolean(),
+                    url: z.string().optional(),
+                    hostname: z.string().optional(),
+                    port: z.number().optional(),
+                    options: z
+                      .object({
+                        hostname: z.string(),
+                        port: z.number(),
+                        mdns: z.boolean().optional(),
+                        mdnsDomain: z.string().optional(),
+                        cors: z.array(z.string()).optional(),
+                      })
+                      .optional(),
+                  }),
+                ),
+              },
+            },
+          },
+        },
+      }),
+      async (c) => {
+        return c.json(getPublicListenerStatus())
+      },
+    )
+    .put(
+      "/public-listener",
+      describeRoute({
+        summary: "Configure public listener",
+        description: "Create or reconfigure the optional public listener on this master process.",
+        operationId: "global.public-listener.configure",
+        responses: {
+          200: {
+            description: "Configured public listener status",
+            content: {
+              "application/json": {
+                schema: resolver(
+                  z.object({
+                    active: z.boolean(),
+                    url: z.string().optional(),
+                    hostname: z.string().optional(),
+                    port: z.number().optional(),
+                  }),
+                ),
+              },
+            },
+          },
+          ...errors(400),
+        },
+      }),
+      validator(
+        "json",
+        z.object({
+          hostname: z.string().min(1),
+          port: z.number().int().min(0).max(65535),
+          mdns: z.boolean().optional(),
+          mdnsDomain: z.string().optional(),
+          cors: z.array(z.string()).optional(),
+        }),
+      ),
+      async (c) => {
+        const body = c.req.valid("json") as PublicListenerOptions
+        const status = await configurePublicListener(body)
+        return c.json(status)
+      },
+    )
+    .delete(
+      "/public-listener",
+      describeRoute({
+        summary: "Disable public listener",
+        description: "Disable the optional public listener on this master process.",
+        operationId: "global.public-listener.disable",
+        responses: {
+          200: {
+            description: "Public listener disabled",
+            content: {
+              "application/json": {
+                schema: resolver(z.object({ active: z.literal(false) })),
+              },
+            },
+          },
+        },
+      }),
+      async (c) => {
+        return c.json(await disablePublicListener())
       },
     )
     .get(
