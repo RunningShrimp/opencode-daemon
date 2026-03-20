@@ -36,11 +36,6 @@ export const MODULE_CONFIGS: Record<string, ModuleConfig> = {
     version: "latest",
     type: "native",
   },
-  "@xenova/transformers": {
-    name: "@xenova/transformers",
-    version: "latest",
-    type: "wasm",
-  },
 }
 
 export class ModuleLoader {

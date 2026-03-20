@@ -151,11 +151,20 @@ export class ImageMCPRouter {
    * @returns Best tool for the task, or null if no suitable tool found
    */
   async selectBestTool(features: ImageFeature[], sessionID?: string): Promise<MCPToolCapability | null> {
-    // Build task description based on image features
-    const mimeType = features[0]?.mimeType || ""
+    const primary = features[0]
+    const mimeType = primary?.mimeType || ""
+    const hints = primary?.hints ?? []
 
     let task = "analyze image content"
-    if (mimeType.includes("png") || mimeType.includes("screenshot")) {
+    if (hints.includes("error")) {
+      task = "analyze error screenshot, extract text, identify stack traces, and explain likely fixes"
+    } else if (hints.includes("diagram")) {
+      task = "analyze technical diagram and explain components, labels, and relationships"
+    } else if (hints.includes("chart")) {
+      task = "analyze chart or graph, read labels, and summarize key trends"
+    } else if (hints.includes("document") || hints.includes("code")) {
+      task = "analyze image with dense text and extract the important visible content accurately"
+    } else if (mimeType.includes("png") || mimeType.includes("screenshot")) {
       task = "analyze screenshot and describe UI elements"
     } else if (mimeType.includes("jpeg") || mimeType.includes("jpg")) {
       task = "analyze photo and describe content"

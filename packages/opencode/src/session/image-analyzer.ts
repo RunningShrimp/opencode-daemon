@@ -15,6 +15,10 @@ function isImageMimeType(mimeType: string): boolean {
  */
 export type ImageComplexity = "low" | "medium" | "high"
 
+export type ImageContentHint = "ui" | "error" | "diagram" | "chart" | "document" | "code" | "photo" | "icon"
+
+export type ImageTextDensity = "low" | "medium" | "high"
+
 /**
  * Image feature extracted from an image part
  */
@@ -34,6 +38,10 @@ export interface ImageFeature {
   }
   /** Estimated complexity of image content */
   complexity: ImageComplexity
+  /** High-level hints about the image content */
+  hints?: ImageContentHint[]
+  /** Estimated amount of text likely present in the image */
+  textDensity?: ImageTextDensity
   /** Base64 encoded image data (if available for analysis) */
   base64?: string
   /** URL to the image (if available) */
@@ -104,9 +112,12 @@ export class ImageAnalyzer {
   async analyzeFeature(imagePart: { mime?: string; url?: string; filename?: string }): Promise<ImageFeature> {
     const mimeType = imagePart.mime || "image/unknown"
     const filename = imagePart.filename || "unknown"
+    const url = imagePart.url || ""
+    const hints = this.classifyContentHints(filename, mimeType, url)
 
     // Estimate complexity based on filename hints and mime type
-    const complexity = this.estimateComplexity(filename, mimeType)
+    const complexity = this.estimateComplexity(filename, mimeType, hints)
+    const textDensity = this.estimateTextDensity(hints)
 
     const feature: ImageFeature = {
       id: `img_${Date.now()}_${Math.random().toString(36).substring(7)}`,
@@ -114,6 +125,8 @@ export class ImageAnalyzer {
       size: 0, // Will be updated if we can get file size
       filename,
       complexity,
+      hints,
+      textDensity,
     }
 
     if (imagePart.url) {
@@ -124,6 +137,8 @@ export class ImageAnalyzer {
       filename: feature.filename,
       mimeType: feature.mimeType,
       complexity: feature.complexity,
+      hints: feature.hints,
+      textDensity: feature.textDensity,
     })
 
     return feature
@@ -135,8 +150,16 @@ export class ImageAnalyzer {
    * @param mimeType - MIME type of the image
    * @returns Estimated complexity level
    */
-  private estimateComplexity(filename: string, mimeType: string): ImageComplexity {
+  private estimateComplexity(filename: string, mimeType: string, hints: ImageContentHint[]): ImageComplexity {
     const lower = filename.toLowerCase()
+
+    if (hints.includes("error") || hints.includes("code") || hints.includes("document")) {
+      return "high"
+    }
+
+    if (hints.includes("diagram") || hints.includes("chart") || hints.includes("ui")) {
+      return "medium"
+    }
 
     // Screenshots and diagrams are typically medium complexity
     if (lower.includes("screenshot") || lower.includes("screen") || lower.includes("capture")) {
@@ -170,6 +193,64 @@ export class ImageAnalyzer {
 
     // Default to medium complexity
     return "medium"
+  }
+
+  private classifyContentHints(filename: string, mimeType: string, url: string): ImageContentHint[] {
+    const lower = `${filename} ${url}`.toLowerCase()
+    const hints = new Set<ImageContentHint>()
+
+    if (lower.includes("error") || lower.includes("exception") || lower.includes("stack") || lower.includes("trace")) {
+      hints.add("error")
+      hints.add("ui")
+    }
+    if (
+      lower.includes("screenshot") ||
+      lower.includes("screen") ||
+      lower.includes("capture") ||
+      lower.includes("window") ||
+      lower.includes("dialog")
+    ) {
+      hints.add("ui")
+    }
+    if (lower.includes("diagram") || lower.includes("flowchart") || lower.includes("architecture") || lower.includes("uml")) {
+      hints.add("diagram")
+    }
+    if (lower.includes("chart") || lower.includes("graph") || lower.includes("dashboard") || lower.includes("plot")) {
+      hints.add("chart")
+    }
+    if (lower.includes("doc") || lower.includes("paper") || lower.includes("invoice") || lower.includes("form")) {
+      hints.add("document")
+    }
+    if (lower.includes("code") || lower.includes("terminal") || lower.includes("editor") || lower.includes("source")) {
+      hints.add("code")
+    }
+    if (lower.includes("icon") || lower.includes("logo") || lower.includes("avatar")) {
+      hints.add("icon")
+    }
+
+    if (mimeType === "image/jpeg" || mimeType === "image/jpg") {
+      hints.add("photo")
+    }
+    if (mimeType === "image/svg+xml") {
+      hints.add("diagram")
+      hints.add("icon")
+    }
+
+    if (hints.size === 0) {
+      hints.add(mimeType === "image/png" ? "ui" : "photo")
+    }
+
+    return [...hints]
+  }
+
+  private estimateTextDensity(hints: ImageContentHint[]): ImageTextDensity {
+    if (hints.some((hint) => ["error", "document", "code", "chart", "diagram"].includes(hint))) {
+      return "high"
+    }
+    if (hints.includes("ui")) {
+      return "medium"
+    }
+    return "low"
   }
 
   /**

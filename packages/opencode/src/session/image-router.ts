@@ -4,8 +4,11 @@ import { getImageAnalyzer, type ImageFeature } from "./image-analyzer"
 import { getImageMCPRouter, type ImageMCPRouter } from "./image-mcp-router"
 import { getMultimodalSelector, type MultimodalModelSelector, type CostBudget } from "@/provider/multimodal-selector"
 import { Provider } from "@/provider/provider"
+import type { ModelID, ProviderID } from "@/provider/schema"
+import { ModelID as ModelIDSchema, ProviderID as ProviderIDSchema } from "@/provider/schema"
 import { getGlobalMCPRouter, getMCPRouter } from "@/util/smart-router"
 import { withMcpLimit } from "@/util/concurrency-limiter"
+import type { SessionID } from "./schema"
 
 const log = Log.create({ service: "image.router" })
 
@@ -21,9 +24,9 @@ export interface ImageStrategy {
   /** Strategy type */
   type: ImageStrategyType
   /** Provider ID (for multimodal model) */
-  providerID?: string
+  providerID?: ProviderID
   /** Model ID (for multimodal model) */
-  modelID?: string
+  modelID?: ModelID
   /** MCP tool name (for MCP strategy) */
   mcpToolName?: string
   /** MCP server name (for MCP strategy) */
@@ -38,7 +41,7 @@ export interface ImageStrategy {
     output: number
   }
   /** Session ID for router metrics */
-  sessionID?: string
+  sessionID?: SessionID
 }
 
 /**
@@ -61,15 +64,15 @@ export interface ImageInterpretationResult {
 export interface RoutingContext {
   /** Current model being used */
   currentModel?: {
-    providerID: string
-    modelID: string
+    providerID: ProviderID
+    modelID: ModelID
   }
   /** Whether user prefers MCP */
   preferMcp?: boolean
   /** Cost budget setting */
   budget?: CostBudget
   /** Session ID for tracking */
-  sessionID?: string
+  sessionID?: SessionID
 }
 
 /**
@@ -159,6 +162,9 @@ export class ImageRouter {
    */
   async selectStrategy(features: ImageFeature[], context: RoutingContext = {}): Promise<ImageStrategy> {
     const config = await this.loadConfig()
+    const shouldBiasTowardMcp = features.some((feature) =>
+      (feature.hints ?? []).some((hint) => ["error", "diagram", "chart", "document", "code"].includes(hint)),
+    )
 
     if (!config.enabled) {
       return {
@@ -169,7 +175,7 @@ export class ImageRouter {
     }
 
     // Check if MCP tools are preferred and available
-    if (config.preferMcp || context.preferMcp) {
+    if (config.preferMcp || context.preferMcp || shouldBiasTowardMcp) {
       const hasMcpTools = await this.mcpRouter.hasImageTools(context.sessionID)
       if (hasMcpTools) {
         const bestTool = await this.mcpRouter.selectBestTool(features, context.sessionID)
@@ -188,7 +194,12 @@ export class ImageRouter {
     }
 
     // Fall back to multimodal model
-    const imageComplexity = features[0]?.complexity || "medium"
+    const imageComplexity =
+      features.some((feature) => feature.complexity === "high")
+        ? "high"
+        : features.some((feature) => feature.complexity === "medium")
+          ? "medium"
+          : "low"
     const modelResult = await this.multimodalSelector.selectForImageComplexity(imageComplexity, {
       budget: context.budget || config.budget,
       preferredProvider: context.currentModel?.providerID,
@@ -201,8 +212,9 @@ export class ImageRouter {
       })
       return {
         type: "multimodal_model",
-        providerID: modelResult.model.providerID,
-        modelID: modelResult.model.modelID,
+        providerID: ProviderIDSchema.make(modelResult.model.providerID),
+        modelID: ModelIDSchema.make(modelResult.model.modelID),
+        sessionID: context.sessionID,
         reason: modelResult.reason,
         confidence: modelResult.isFallback ? 0.5 : 0.85,
         estimatedCost: {
@@ -276,7 +288,9 @@ export class ImageRouter {
       throw new Error("Invalid MCP strategy: missing tool or server name")
     }
 
-    const toolID = `${strategy.mcpServerName.replace(/[^a-zA-Z0-9_-]/g, "_")}_${strategy.mcpToolName.replace(/[^a-zA-Z0-9_-]/g, "_")}`
+    const toolName = strategy.mcpToolName
+    const serverName = strategy.mcpServerName
+    const toolID = `${serverName.replace(/[^a-zA-Z0-9_-]/g, "_")}_${toolName.replace(/[^a-zA-Z0-9_-]/g, "_")}`
     const router = strategy.sessionID ? getMCPRouter(strategy.sessionID) : getGlobalMCPRouter()
 
     // Prepare image data for MCP tool
@@ -296,20 +310,20 @@ export class ImageRouter {
       // Get MCP clients
       const { MCP } = await import("@/mcp")
       const clients = await MCP.clients()
-      const client = clients[strategy.mcpServerName]
+      const client = clients[serverName]
 
       if (!client) {
-        throw new Error(`MCP client not found: ${strategy.mcpServerName}`)
+        throw new Error(`MCP client not found: ${serverName}`)
       }
 
       // Call the tool with image data
       const started = Date.now()
       const result = await withMcpLimit(() =>
         client.callTool({
-          name: strategy.mcpToolName,
+          name: toolName,
           arguments: {
             images: imageData,
-            prompt: prompt || "Describe this image in detail",
+            prompt: this.buildAnalysisPrompt(features, prompt),
           },
         }),
       )
@@ -332,8 +346,8 @@ export class ImageRouter {
     } catch (error) {
       router.recordToolCall(toolID, false, 0, strategy.sessionID)
       log.error("MCP tool execution failed", {
-        tool: strategy.mcpToolName,
-        server: strategy.mcpServerName,
+        tool: toolName,
+        server: serverName,
         error,
       })
       throw error
@@ -419,12 +433,12 @@ export class ImageRouter {
               ...validContents,
               {
                 type: "text",
-                text: prompt || "Describe this image in detail, including any text, UI elements, or visual content.",
+                text: this.buildAnalysisPrompt(features, prompt),
               },
             ],
           },
         ],
-        maxSteps: config.modelTimeout / 1000,
+        abortSignal: AbortSignal.timeout(config.modelTimeout),
       } as any)
 
       // Return the text result
@@ -455,6 +469,37 @@ To enable image analysis, please either:
 2. Add a multimodal model provider (e.g., OpenAI GPT-4V, Claude Vision, Google Gemini)
 
 ${prompt ? `Your question: ${prompt}` : ""}`
+  }
+
+  private buildAnalysisPrompt(features: ImageFeature[], prompt: string): string {
+    const hints = [...new Set(features.flatMap((feature) => feature.hints))]
+    const textDense = features.some((feature) => feature.textDensity === "high")
+    const sections = [
+      "Analyze the provided image carefully and ground the answer in visible evidence.",
+      prompt ? `User request: ${prompt}` : "User request: Interpret the image and explain the important visible content.",
+    ]
+
+    if (hints.includes("error")) {
+      sections.push("Prioritize extracting the exact error text, stack trace fragments, failing subsystem, and the most likely fix path.")
+    }
+    if (hints.includes("diagram")) {
+      sections.push("Explain the diagram type, major components, arrows, labels, and the main flow or dependency structure.")
+    }
+    if (hints.includes("chart")) {
+      sections.push("Read chart titles, axes, legends, and summarize the main quantitative trend instead of only describing colors or shapes.")
+    }
+    if (hints.includes("ui")) {
+      sections.push("Describe the screen hierarchy, visible controls, current state, and any important text shown in the interface.")
+    }
+    if (hints.includes("document") || hints.includes("code") || textDense) {
+      sections.push("Extract the most important visible text verbatim before summarizing it.")
+    }
+    if (hints.includes("photo") && !hints.includes("ui")) {
+      sections.push("Describe the primary subjects, setting, actions, and anything unusual or relevant to the user's request.")
+    }
+
+    sections.push("When uncertain, say what is visible versus what is inferred.")
+    return sections.join("\n")
   }
 
   /**
