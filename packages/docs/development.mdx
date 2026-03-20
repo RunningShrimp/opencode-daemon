@@ -75,6 +75,18 @@ If the deployment is successful, you should see the following:
 
 We suggest using extensions on your IDE to recognize and format MDX. If you're a VSCode user, consider the [MDX VSCode extension](https://marketplace.visualstudio.com/items?itemName=unifiedjs.vscode-mdx) for syntax highlighting, and [Prettier](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode) for code formatting.
 
+## Daemon validation
+
+For daemon master-worker development, run validation from the package directory:
+
+```bash
+cd packages/opencode
+bun run test:daemon-p8
+bun run tsgo --noEmit
+```
+
+The `test:daemon-p8` command validates Scenario A-G integration coverage and gate checks (Z/W/L/M/D/S), plus single-file bootstrap and TUI attach compatibility.
+
 ## Troubleshooting
 
 <AccordionGroup>

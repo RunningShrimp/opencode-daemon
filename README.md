@@ -9,7 +9,7 @@
 </p>
 
 <p align="center"><strong>OpenCode Daemon</strong></p>
-<p align="center">基于 anomalyco/opencode 的持续优化分支，重点加强 TUI 稳定性、会话控制、并发性能、国内网络可用性和 fork 发布流程。</p>
+<p align="center">基于 anomalyco/opencode 的持续优化分支，重点加强终端体验、长会话稳定性、代码理解链路和本地维护能力。</p>
 
 [![OpenCode Terminal UI](packages/web/src/assets/lander/screenshot.png)](https://github.com/anomalyco/opencode)
 
@@ -17,7 +17,7 @@
 
 ## 这是什么
 
-OpenCode Daemon 是一个基于 [anomalyco/opencode](https://github.com/anomalyco/opencode) 的优化分支。
+OpenCode Daemon 是一个基于 [anomalyco/opencode](https://github.com/anomalyco/opencode) 的长期维护分支。
 
 它保留了官方版本的核心能力：
 
@@ -27,46 +27,62 @@ OpenCode Daemon 是一个基于 [anomalyco/opencode](https://github.com/anomalyc
 - client/server 设计
 - agent、tool、session、workspace 等完整能力
 
-这个 fork 的重点不是改写产品方向，而是持续修正官方版本在高频真实使用中的几个痛点：
+这个 fork 不打算改掉 OpenCode 的产品方向，重点是把官方版在高频使用中最容易遇到的问题继续向前修：
 
 - 长时间运行时的 TUI 稳定性
-- Web / TUI 会话页在大历史窗口下的可用性
-- agent 执行链路的自驱动与子任务调度能力
-- Thinking 模型与多 provider 的一致性
-- 大会话下的 turn-control 与 compaction 行为
-- Skills / LSP / MCP 路径上的性能与并发
-- 面向编辑工具的 hashline 定位与校验基础设施
+- 大会话、大历史记录下的首屏速度和滚动体验
+- agent 的自驱动、收束质量和任务延续能力
+- Skills、LSP、MCP 的路由效率和并发表现
+- 知识图谱、RAG、tree-sitter 这一整条“理解代码”的链路
 - 中国大陆网络环境下的模型资源可用性
-- fork 仓库的手动发布、二进制兼容和本地替换流程
+- fork 仓库的构建、发布和本地替换流程
 
 如果你需要官方稳定发布，请优先关注上游仓库。
-如果你需要更激进的 daemon/TUI 优化、`opencoded` 兼容二进制、以及面向本地维护者的发布与验证能力，这个仓库就是针对这些场景维护的。
+如果你需要一个更偏“实战维护”的版本，尤其关心终端体验、长会话可用性、RAG 稳定性和 `opencoded` 二进制替换流程，这个仓库就是为这些场景维护的。
 
-## 这个版本相对官方版补强了什么
+## 为什么有这个优化版本
+
+这个优化版本存在的目的很直接：
+
+- 把 OpenCode 从“能跑”继续推进到“适合高频日常使用”。
+- 解决官方版本在长会话、终端交互和本地维护场景中更容易暴露的问题。
+- 在尽量保持兼容的前提下，增强稳定性、响应速度、代码理解能力和发布可操作性。
+- 让中国大陆网络环境、本地二进制替换和 fork 维护工作流更直接、更少阻塞。
+
+## 主要增强
+
+- 更快：会话历史改成最近内容优先渲染，长对话首屏更快，向上滚动时再按页补历史，diff 和消息区域不再轻易把界面拖慢。
+- 更稳：修了 TUI 空白、终端恢复、焦点丢失、日志清理、会话丢失、子进程退出、工作区切换等一批高频问题。
+- 更省上下文：会在发送给模型的上下文里主动移除旧 reasoning、synthetic reminder 和冗余工具输出，只在清理后仍然超预算时才触发 compaction。
+- 更聪明：补强了自驱动 agent、self-review、quality gate、任务依赖阻断和后续任务延续逻辑，减少“看起来结束了，其实没做完”。
+- 更懂代码：知识图谱、RAG、tree-sitter、hashline、workspace intelligence 继续往工程化方向推进，减少误连和噪声上下文。
+- 更好接工具：MCP、Skills、LSP 都做了路由和性能优化，多工具场景下更容易保持响应速度。
+- 更能落地：补了 `opencoded` 打包、手动发布流程、日志路径隔离、模型镜像和网络失败回退，方便本地长期使用。
+
+## 谁适合用
+
+- 想把 OpenCode 当成日常开发工具，而不是只跑一次 demo 的团队或个人。
+- 长时间使用 TUI、经常开大项目、需要处理很多历史上下文的人。
+- 需要在中国大陆网络环境下尽量降低模型下载失败影响的人。
+- 希望自己维护二进制和发版流程的维护者。
+
+## 与官方版的区别
 
 这个 fork 不试图改变 OpenCode 的产品方向，而是更关注官方版本在高频、长时、真实项目环境里暴露出来的几个问题，并把它们往“更稳、更可控、更适合本地维护”的方向推进。
 
-首先是会话体验，尤其是大历史窗口下的 TUI 可用性。我们重点修了长会话首屏卡顿、回滚后主面板空白、终端面板偶发空白、流式消息时序竞态这类问题，并把消息列表改成“最近 turns 优先渲染，向上滚动再逐批补历史”的方式。对外表现就是：长会话更能用，不容易一滚就卡，也不容易在切 session、revert 或工具流输出时把界面打乱。
+首先是会话体验，尤其是大历史窗口下的 TUI 可用性。这个版本重点修了长会话首屏卡顿、回滚后主面板空白、终端面板偶发空白、流式消息时序竞态、Sidebar 同步异常、提示框粘贴和滚动跟不上等问题，并把消息列表改成“最近 turns 优先渲染，向上滚动再逐批补历史”的方式。对普通用户来说，最直接的变化就是：长会话更能用，切 session 更稳，滚动时不容易一下子卡死。
 
-其次是 agent 的收束质量。官方版本已经具备很强的工具调用和会话能力，但在复杂任务里，模型是否该继续、是否该压缩上下文、是否真的完成目标，仍然会受到单轮上下文和模型习惯影响。这个版本在这些点上加了更多运行时约束，包括 dynamic turn control、predictive compaction、self-driven agent、任务依赖阻断、QualityGate runtime enforcement，以及更完整的中英双语反迎合验证。简单说，就是尽量减少“看起来结束了，其实没做完”或者“回答很像对的，但证据不够”的情况。
+在终端交互层，这个版本也继续把侧栏和文件审阅体验往“更直接”推进。Modified Files 不再做单击预览，改成纯双击进入 `vim -d -R` diff review；Knowledge Graph 也可以直接在侧栏里看到 relevant nodes、分类节点和关系摘要，便于在大仓库里快速建立上下文。
 
-再往下是代码理解和检索链路。我们把知识图谱、检索和项目记忆这条链路做得更偏工程化一些：知识图谱不再主要依赖浅层 regex，而是优先走 AST/tree-sitter；跨文件符号、import、调用和实例化关系的解析更细；embedding provider 支持显式切换并能暴露 ready、fallback、failed 等运行状态；workspace intelligence 也不再只是静态拼接上下文，而是增加了 sibling workspace 排序和跨项目经验迁移。对使用者来说，这会直接反映在更少的误连、更少的噪声上下文，以及更稳定的自动补全与检索结果上。
+其次是 agent 的收束质量。官方版本已经具备很强的工具调用和会话能力，但在复杂任务里，模型是否该继续、是否该压缩上下文、是否真的完成目标，仍然会受到单轮上下文和模型习惯影响。这个版本继续加强了 dynamic turn control、predictive compaction、self-driven agent、任务依赖阻断、QualityGate runtime enforcement、自我审查工作流，以及“把上一轮未完成任务带进下一轮”的连续执行能力。最近又把 continuation 判断进一步收紧到“只有上一轮真的存在下一步或剩余任务时才继续”，减少无意义自动续跑。简单说，就是尽量减少“看起来结束了，其实没做完”或者“回答很像对的，但证据不够”的情况。
 
-我们也补强了很多“官方版不一定优先处理，但本地维护非常需要”的基础设施。包括更稳健的并发队列和高频写路径、国内网络环境下的模型资源回退、GLM-5 和 MiniMax-M2.5 这类模型的缓存污染修复、日志与 XDG 路径兼容、`opencode` / `opencoded` 双二进制兼容，以及更适合 fork 仓库的手动发布和本地替换流程。这部分不是最显眼的功能，但会直接决定这个版本能不能被长期拿来当日常工作工具，而不只是“能跑一次”。
+和这条链路配套的，还有一层只作用于模型输入、不改动真实会话历史的上下文清理。旧 reasoning、synthetic reminder、重复或超大的工具输出、历史工具错误，现在会先在发送给模型前做清理或摘要；如果清理后上下文仍然接近模型上限，再决定是否压缩。这样做的目的不是“把历史藏起来”，而是让模型看到更干净、更有信息密度的上下文，同时尽量少触发不必要的 compaction。
+
+再往下是代码理解和检索链路。我们把知识图谱、检索和项目记忆这条链路做得更偏工程化一些：知识图谱不再主要依赖浅层 regex，而是优先走 AST/tree-sitter；跨文件符号、import、调用和实例化关系的解析更细；embedding provider 支持显式切换并能暴露 ready、fallback、failed 等运行状态；workspace intelligence 也不再只是静态拼接上下文，而是增加了 sibling workspace 排序和跨项目经验迁移。近期还把默认 embedding 切到新的默认模型，并改成后台优先启动、失败自动回退，不让下载失败直接卡住 prompt 输入；即使远端模型拉取失败，prompt 仍然可以先用 fallback 继续工作。
+
+我们也补强了很多“官方版不一定优先处理，但本地维护非常需要”的基础设施。包括更稳健的并发队列和高频写路径、MCP Smart Router、Skills Router、LSP 池化与复用、国内网络环境下的模型资源回退、部分第三方模型的缓存污染修复、日志与 XDG 路径兼容，以及更适合 fork 仓库的手动发布和本地替换流程。这部分不是最显眼的功能，但会直接决定这个版本能不能被长期拿来当日常工作工具，而不只是“能跑一次”。
 
 如果要概括这个版本和官方版的差异，可以理解为：官方版更像快速演进的主线产品，这个版本更像围绕 daemon、TUI、本地运行与长期维护做过一轮实战加固的分支。它没有试图重写 OpenCode，而是在尽量保持兼容的前提下，把稳定性、收束质量、检索准确性和维护体验往前推了一步。
-
-## 已验证的重点场景
-
-- 使用 tmux 隔离环境启动本仓库 TUI。
-- 提交普通提示词后，模型可正常接收、渲染和返回结果。
-- 在 GLM-5 和 MiniMax-M2.5 下可看到 Thinking 标记。
-- 大会话下首屏只渲染最近 turns，向上滚动时可以逐批展开并继续拉取更早历史。
-- 执行 `/session` 和 `/sessions` 时主界面可以正常渲染。
-- 打开 terminal panel 时可以自动补建可用终端，并在切换后恢复焦点。
-- 文件标签页中的行级评论可以直接进入 prompt context，编辑和删除会同步更新上下文内容。
-- 日志路径可稳定产出日志并用于排查 ERROR。
-- 当前平台二进制可打包为 `opencoded` 并替换到本地 `.local/bin`。
 
 ## 快速开始
 
@@ -91,6 +107,8 @@ OPENCODE_VERSION=1.0.0-local bun run packages/opencode/script/build.ts --single
 ./packages/opencode/dist/opencode-darwin-arm64/bin/opencoded --version
 ```
 
+`--single` 现在只会为当前平台生成一个可执行文件：`opencoded`。
+
 如果你在非 macOS arm64 平台上构建，`dist` 目录中的目标名称会随平台变化。
 
 ### 本地替换二进制
@@ -100,21 +118,23 @@ install -m 755 ./packages/opencode/dist/opencode-darwin-arm64/bin/opencoded ~/.l
 ~/.local/bin/opencoded --version
 ```
 
-### 推荐验证脚本
-
-```bash
-./script/tui-validate-tmux.sh
-```
-
-这个脚本会在隔离的 XDG 环境下进行 TUI 验证，避免你的用户数据和缓存影响结果。
-
 ## Embedding Provider 配置
 
 当前默认行为：
 
 - 未设置 `OPENCODE_EMBEDDING_PROVIDER` 时，后台优先启动 transformers provider。
 - provider 初始化失败时会自动回退到语义 fallback，不阻塞会话启动。
+- provider 后台启动超时后会快速放弃等待，避免索引或 prompt 长时间卡在模型下载上。
+- 默认会启用仓库内预设的文本 embedding 模型。
 - 会话 system prompt 会注入 `<embedding_runtime>` 状态块，便于观察当前活跃 provider 与失败原因。
+
+## 当前终端体验
+
+- 长会话默认只先加载最近一段消息，首屏更快，继续向上滚动时再分页补更早历史。
+- 历史上下文会在发给模型前做一次临时清理，减少旧 reasoning、重复工具输出和 reminder 噪声。
+- Modified Files 采用纯双击进入 `vim` diff review，不保留单击预览态。
+- 侧栏聚焦在 MCP、LSP、Modified Files、Knowledge Graph 这几块高频信息。
+- Knowledge Graph 侧栏会按当前用户问题刷新 relevant 节点和关系摘要。
 
 可用 provider：
 
@@ -184,25 +204,26 @@ export OPENCODE_EMBEDDING_PROVIDER=fallback
 官方文档中的大部分模型接入、agent、tool、session 配置说明仍然适用于这个 fork。
 本仓库 README 主要补充 fork 的差异化能力、构建方式和维护者关注点。
 
-## 为什么维护这个 fork
+## 维护原则
 
-这个仓库存在的核心原因很简单：
+这个仓库的维护原则很简单：
 
-- 官方版本迭代快，但某些 TUI / daemon 侧问题需要更快落地和持续验证。
+- 官方版本迭代快，但某些 TUI / daemon 侧问题需要更快落地。
 - 本地维护者需要一个可重复打包、可替换二进制、可手动发版的工作流。
 - 国内网络环境下，模型资源下载失败不能成为整个流程的硬阻断点。
+- 我们希望 README 能直接告诉普通使用者：这个优化版本是做什么的、增强了什么、与官方版有什么差异。
 
 因此这个 fork 的原则是：
 
 - 尽量保持与上游结构兼容。
 - 优先修复真实可复现的问题。
-- 让构建、验证、发布和回滚都更直接。
+- 让构建、发布和回滚都更直接。
 
 ## 贡献与声明
 
 欢迎继续在这个 fork 上推进 daemon/TUI/发布链路相关优化。
 
-- 如果你的目标是向官方仓库提交通用修复，请尽量保持改动最小并验证与上游兼容。
-- 如果你的目标是面向本 fork 的本地维护，请优先补充可复现脚本、日志路径和验证步骤。
+- 如果你的目标是向官方仓库提交通用修复，请尽量保持改动最小并兼容上游。
+- 如果你的目标是面向本 fork 的本地维护，请优先补充清晰的复现信息、日志路径和使用说明。
 
 本仓库是基于 OpenCode 的非官方优化分支，不代表上游团队的发布节奏或维护承诺。

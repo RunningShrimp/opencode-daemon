@@ -1,5 +1,10 @@
 # opencode database guide
 
+## Delivery Standard
+
+- Production-only output is mandatory. Do not ship mock logic, placeholder implementations, fake data paths, or TODO-backed behavior unless the user explicitly requests a stub.
+- Prefer complete enterprise-ready behavior, real validation, and real error handling over partial scaffolding.
+
 ## Database
 
 - **Schema**: Drizzle schema lives in `src/**/*.sql.ts`.
